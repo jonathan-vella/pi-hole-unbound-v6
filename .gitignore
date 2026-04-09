@@ -1,0 +1,25 @@
+.env
+.venv/
+node_modules/
+vendor/bundle/
+.bundle/
+.npm-cache/
+.claude/
+
+# Installer/runtime artifacts (local-only)
+data/
+*.log
+install-debug.log
+pihole-deployment-evidence/
+report.md
+
+# Windows download metadata
+*:Zone.Identifier
+
+# Python cache
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+docs/assets/Pi-hole*Management*Suite*.png
