@@ -1,0 +1,12 @@
+# ShellCheck configuration for Pi-hole + Unbound Suite
+# https://www.shellcheck.net/wiki/
+# All scripts in this repo target bash on Debian/Ubuntu.
+
+# Default shell
+shell=bash
+
+# Disabled checks:
+# SC2034 - Variable appears unused (many are used via source/export in other scripts)
+# SC1091 - Not following sourced file (ui.sh is sourced dynamically)
+# SC2155 - Declare and assign separately (common pattern in this codebase, low risk)
+disable=SC2034,SC1091,SC2155

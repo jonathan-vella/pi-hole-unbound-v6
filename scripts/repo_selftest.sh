@@ -206,7 +206,7 @@ test_required_files() {
   cd_repo_root || return 1
 
   local file
-  for file in install.sh README.md README.de.md start_suite.py scripts/post_install_check.sh scripts/console_menu.sh .gitignore; do
+  for file in install.sh README.md README.de.md start_suite.py scripts/post_install_check.sh scripts/console_menu.sh scripts/auto_update.sh scripts/boot_health_check.sh .gitignore; do
     if [[ -f "$file" ]]; then
       pass "Required file exists: $file"
     else
@@ -221,7 +221,7 @@ test_optional_files() {
   cd_repo_root || return 1
 
   local file
-  for file in tools/pihole_maintenance_pro.sh docs/CONSOLE_MENU.md; do
+  for file in tools/pihole_maintenance_pro.sh docs/CONSOLE_MENU.md config/logrotate-pihole-auto-update config/pihole-boot-check.service; do
     if [[ -f "$file" ]]; then
       info "Optional file present: $file"
     else

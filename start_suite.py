@@ -25,6 +25,7 @@
 # =============================================================================
 import os
 import re
+import hmac
 import subprocess
 import time
 from typing import Any
@@ -50,7 +51,7 @@ def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Ke
     expected = _env("SUITE_API_KEY", default="")
     if expected == "":
         raise HTTPException(status_code=500, detail="Server not configured: SUITE_API_KEY missing")
-    if x_api_key != expected:
+    if x_api_key is None or not hmac.compare_digest(x_api_key, expected):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 

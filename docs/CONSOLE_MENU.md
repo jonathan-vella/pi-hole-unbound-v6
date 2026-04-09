@@ -20,9 +20,9 @@ Both menus use `scripts/lib/ui.sh` for consistent output formatting.
 ## Console Menu
 
 ```bash
-bash ~/Pi-hole-Unbound-PiAlert-Setup/scripts/console_menu.sh
+bash ~/pi-hole-unbound-v6/scripts/console_menu.sh
 # Force text mode (bypass dialog):
-bash ~/Pi-hole-Unbound-PiAlert-Setup/scripts/console_menu.sh --text
+bash ~/pi-hole-unbound-v6/scripts/console_menu.sh --text
 # Non-interactive check:
 bash scripts/console_menu.sh --check
 ```
@@ -45,7 +45,7 @@ bash scripts/console_menu.sh --check
 ### System-Wide Access
 
 ```bash
-sudo ln -sf ~/Pi-hole-Unbound-PiAlert-Setup/scripts/console_menu.sh /usr/local/bin/pihole-suite
+sudo ln -sf ~/pi-hole-unbound-v6/scripts/console_menu.sh /usr/local/bin/pihole-suite
 pihole-suite   # now works from anywhere
 ```
 
@@ -159,6 +159,41 @@ Colors are automatically disabled when:
 | `/home/pi/pihole-rescue-backups/` | Backup storage |
 | `/var/log/pihole-rescue-menu.log` | Rescue menu session log |
 | `/var/log/pihole_maintenance_pro_*.log` | Maintenance Pro logs |
+| `/var/log/pihole-suite/auto_update.log` | Auto-update log |
+| `/var/backups/pihole-auto/` | Pre-update config snapshots |
+| `/var/tmp/pihole_boot_status` | Boot health check status |
+
+---
+
+## Automated Update System
+
+In addition to the interactive menus, the suite includes an automated update system:
+
+### Weekly Auto-Update (`scripts/auto_update.sh`)
+
+A hardened wrapper that runs `pihole_maintenance_pro.sh` unattended on a cron schedule (default: **Sunday 3 AM**). Includes pre-flight checks, config snapshots, Unbound validation with rollback, DNS health checks, and optional webhook notifications.
+
+```bash
+# Enable via installer
+sudo ./install.sh --with-auto-update
+
+# Or test manually
+DRY_RUN=1 bash scripts/auto_update.sh
+```
+
+Logs: `/var/log/pihole-suite/auto_update.log` (rotated weekly, 8 rotations)
+
+### Boot Health Check (`scripts/boot_health_check.sh`)
+
+Runs automatically after reboot via `config/pihole-boot-check.service` (systemd oneshot). Validates Pi-hole and Unbound DNS, auto-restarts services if DNS is down, and writes status to `/var/tmp/pihole_boot_status`.
+
+```bash
+# Check boot status
+cat /var/tmp/pihole_boot_status
+
+# Service status
+systemctl status pihole-boot-check.service
+```
 
 ---
 

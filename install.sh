@@ -64,6 +64,7 @@ FORCE=false
 AUTO_REMOVE_CONFLICTS=false
 INSTALL_NETALERTX=false
 INSTALL_PYTHON_SUITE=true
+INSTALL_AUTO_UPDATE=false
 
 # Ports
 UNBOUND_PORT=5335
@@ -299,6 +300,7 @@ parse_args() {
       --auto-remove-conflicts) AUTO_REMOVE_CONFLICTS=true ;;
       --install-netalertx|--with-netalertx) INSTALL_NETALERTX=true ;;
       --skip-netalertx) INSTALL_NETALERTX=false ;;
+      --with-auto-update) INSTALL_AUTO_UPDATE=true ;;
       --skip-python-api) INSTALL_PYTHON_SUITE=false ;;
       --minimal) INSTALL_NETALERTX=false; INSTALL_PYTHON_SUITE=false ;;
       *) log_error "Unknown option: $1"; exit 1 ;;
@@ -1261,6 +1263,67 @@ run_healthchecks() {
 }
 
 # =============================================
+# AUTO-UPDATE SYSTEM (opt-in)
+# =============================================
+setup_auto_update() {
+  log "Setting up automated weekly update system..."
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: Would install auto-update cron, logrotate, and boot health check"
+    return 0
+  fi
+
+  # Required directories
+  sudo mkdir -p /var/backups/pihole-auto /var/log/pihole-suite
+
+  # Install logrotate config
+  if [[ -f "${SCRIPT_DIR}/config/logrotate-pihole-auto-update" ]]; then
+    sudo cp "${SCRIPT_DIR}/config/logrotate-pihole-auto-update" /etc/logrotate.d/pihole-auto-update
+    sudo chmod 644 /etc/logrotate.d/pihole-auto-update
+    log_success "Logrotate config installed"
+  else
+    log_warning "config/logrotate-pihole-auto-update not found; skipping"
+  fi
+
+  # Install systemd boot health check
+  if [[ -f "${SCRIPT_DIR}/config/pihole-boot-check.service" ]]; then
+    sudo cp "${SCRIPT_DIR}/config/pihole-boot-check.service" /etc/systemd/system/
+    # Rewrite ExecStart to match actual repo location
+    sudo sed -i "s|ExecStart=.*|ExecStart=${SCRIPT_DIR}/scripts/boot_health_check.sh|" \
+      /etc/systemd/system/pihole-boot-check.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable pihole-boot-check.service
+    log_success "Boot health check service enabled (ExecStart=${SCRIPT_DIR}/scripts/boot_health_check.sh)"
+  else
+    log_warning "config/pihole-boot-check.service not found; skipping"
+  fi
+
+  # Make scripts executable
+  chmod +x "${SCRIPT_DIR}/scripts/auto_update.sh" 2>/dev/null || true
+  chmod +x "${SCRIPT_DIR}/scripts/boot_health_check.sh" 2>/dev/null || true
+
+  # Install weekly auto-update cron (Sunday 3 AM) — idempotent
+  local cron_entry="0 3 * * 0 ${SCRIPT_DIR}/scripts/auto_update.sh"
+  if sudo crontab -l 2>/dev/null | grep -qF "auto_update.sh"; then
+    log "Auto-update cron entry already exists"
+  else
+    (sudo crontab -l 2>/dev/null; echo "$cron_entry") | sudo crontab -
+    log_success "Weekly auto-update cron installed (Sunday 3 AM)"
+  fi
+
+  # Install monthly Unbound root hints refresh — idempotent
+  local root_hints_entry="0 4 1 * * curl -sf -o /var/lib/unbound/root.hints.new https://www.internic.net/domain/named.root && grep -q ROOT-SERVERS /var/lib/unbound/root.hints.new && mv /var/lib/unbound/root.hints.new /var/lib/unbound/root.hints && systemctl restart unbound || rm -f /var/lib/unbound/root.hints.new"
+  if sudo crontab -l 2>/dev/null | grep -qF "root.hints"; then
+    log "Root hints refresh cron entry already exists"
+  else
+    (sudo crontab -l 2>/dev/null; echo "$root_hints_entry") | sudo crontab -
+    log_success "Monthly Unbound root hints refresh cron installed"
+  fi
+
+  log_success "Auto-update system installed"
+}
+
+# =============================================
 # MAIN
 # =============================================
 main() {
@@ -1293,6 +1356,13 @@ main() {
   fi
   
   configure_local_dns_resolver
+
+  # Auto-Update System (conditional)
+  if [[ "$INSTALL_AUTO_UPDATE" == true ]]; then
+    setup_auto_update
+  else
+    log "⏭️  Skipping auto-update setup (default; use --with-auto-update)"
+  fi
 
   run_healthchecks
 

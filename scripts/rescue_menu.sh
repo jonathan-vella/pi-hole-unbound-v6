@@ -2,7 +2,7 @@
 # =============================================================================
 # rescue_menu.sh  --  Pi-hole + Unbound Rescue & Maintenance Menu
 # Version: 1.0.0
-# Repo:    https://github.com/TimInTech/Pi-hole-Unbound-PiAlert-Setup
+# Repo:    https://github.com/jonathan-vella/pi-hole-unbound-v6
 # =============================================================================
 # Start globally:  sudo pihole-rescue
 # Self-contained:  works without repo present; sources lib/ui.sh if found.
@@ -17,7 +17,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # CONSTANTS
 # ---------------------------------------------------------------------------
 readonly SCRIPT_VERSION="1.0.0"
-readonly BACKUP_DIR="/home/pi/pihole-rescue-backups"
+readonly BACKUP_DIR="${PIHOLE_BACKUP_DIR:-/home/pi/pihole-rescue-backups}"
 readonly LOG_FILE="/var/log/pihole-rescue-menu.log"
 readonly RESOLV_BACKUP="/tmp/.pihole-rescue-resolv.bak"
 readonly PIHOLE_CONF="/etc/pihole/pihole.toml"
@@ -138,6 +138,17 @@ PYEOF
 # ---------------------------------------------------------------------------
 _set_pihole_upstream() {
   local target="${1:-127.0.0.1#5335}"
+
+  # Validate target format: IPv4#port or [IPv6]#port — reject shell metacharacters
+  if [[ ! "$target" =~ ^[\[0-9a-fA-F.:]+\]?#[0-9]{1,5}$ ]]; then
+    _err "Invalid upstream format: '$target' (expected IP#port, e.g. 127.0.0.1#5335)"
+    return 1
+  fi
+  local port="${target##*#}"
+  if (( port < 1 || port > 65535 )); then
+    _err "Invalid port: $port (must be 1-65535)"
+    return 1
+  fi
 
   # Method 1: pihole v6 CLI
   if command -v pihole &>/dev/null; then
@@ -350,7 +361,7 @@ menu_nightly_test() {
   _header
   printf '  %s=== NIGHTLY / DIAGNOSTIC TEST ===%s\n\n' "$UI_BOLD" "$UI_RESET"
 
-  local nightly="/home/pi/Pi-hole-Unbound-PiAlert-Setup/scripts/nightly_test.sh"
+  local nightly="${_script_dir}/nightly_test.sh"
   if [[ -x "$nightly" ]]; then
     printf '  %sRunning nightly_test.sh...%s\n\n' "$UI_BLUE" "$UI_RESET"
     "$nightly" 2>&1 | sed 's/^/  /'
@@ -430,6 +441,17 @@ menu_backup_restore() {
   local chosen="${_BACKUPS[$((sel - 1))]}"
   local bdir="${BACKUP_DIR}/${chosen}"
   printf '\n  %sRestore from: %s%s\n' "$UI_YELLOW" "$chosen" "$UI_RESET"
+
+  # Security: check for symlinks in backup directory
+  local symlinks
+  symlinks=$(find "$bdir" -type l 2>/dev/null)
+  if [[ -n "$symlinks" ]]; then
+    _err "Backup contains symlinks (possible tampering). Aborting restore."
+    printf '%s\n' "$symlinks" | sed 's/^/    /'
+    _pause
+    return
+  fi
+
   read -rp "  Confirm? [y/N] " confirm
   [[ "${confirm,,}" != "y" ]] && return
 

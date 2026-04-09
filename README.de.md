@@ -4,7 +4,7 @@
 
 ## **Ein-Klick DNS-Sicherheits-Stack**
 
-[![License](https://img.shields.io/github/license/TimInTech/Pi-hole-Unbound-PiAlert-Setup?style=for-the-badge&color=blue)](LICENSE)
+[![License](https://img.shields.io/github/license/jonathan-vella/pi-hole-unbound-v6?style=for-the-badge&color=blue)](LICENSE)
 [![Pi-hole](https://img.shields.io/badge/Pi--hole-v6.4-red?style=for-the-badge&logo=pihole)](https://pi-hole.net/)
 [![Unbound](https://img.shields.io/badge/Unbound-DNS-orange?style=for-the-badge)](https://nlnetlabs.nl/projects/unbound/)
 [![Debian](https://img.shields.io/badge/Debian-Bookworm%2FTrixie-red?style=for-the-badge&logo=debian)](https://debian.org/)
@@ -35,13 +35,26 @@ Pi-hole blockiert Werbung und Tracker. Unbound löst DNS-Anfragen rekursiv auf �
 ## ⚡ Schnellstart
 
 ```bash
-git clone https://github.com/TimInTech/Pi-hole-Unbound-PiAlert-Setup.git
-cd Pi-hole-Unbound-PiAlert-Setup
+git clone https://github.com/jonathan-vella/pi-hole-unbound-v6.git
+cd pi-hole-unbound-v6
 chmod +x install.sh
 sudo ./install.sh
 ```
 
 > Als **normaler Nutzer** klonen (z.B. `pi`), nicht als root. Der Installer wird via `sudo ./install.sh` ausgeführt.
+
+### Installer-Optionen
+
+| Flag | Beschreibung |
+|------|-------------|
+| `--with-auto-update` | Automatisches wöchentliches Update-System installieren (Cron, Logrotate, Systemd) |
+| `--with-netalertx` | NetAlertX Netzwerk-Monitor installieren (Docker) |
+| `--skip-python-api` | Optionale Python Suite API überspringen |
+| `--minimal` | Sowohl NetAlertX als auch Python API überspringen |
+| `--force` | Neuinstallation aller Komponenten erzwingen |
+| `--dry-run` | Simulation ohne Änderungen |
+| `--container-mode` | Pi-hole in Docker statt auf dem Host |
+| `--auto-remove-conflicts` | Konfliktierende Docker-Pakete automatisch entfernen |
 
 ---
 
@@ -89,9 +102,9 @@ Dieses Repo enthält drei komplementäre Verwaltungsinterfaces:
 Allgemeines interaktives Menü für die tägliche Verwaltung.
 
 ```bash
-bash ~/Pi-hole-Unbound-PiAlert-Setup/scripts/console_menu.sh
+bash ~/pi-hole-unbound-v6/scripts/console_menu.sh
 # oder im Text-Modus (kein dialog):
-bash ~/Pi-hole-Unbound-PiAlert-Setup/scripts/console_menu.sh --text
+bash ~/pi-hole-unbound-v6/scripts/console_menu.sh --text
 ```
 
 ![Console Menu](docs/assets/screenshot_console_menu.png)
@@ -158,15 +171,70 @@ Flags: `--no-apt`, `--no-upgrade`, `--no-gravity`, `--restart-ftl`, `--backup`, 
 
 ---
 
+### 4. Automatisches Wöchentliches Update (`scripts/auto_update.sh`)
+
+Ein gehärteter unbeaufsichtigter Update-Wrapper, der `pihole_maintenance_pro.sh` nach Zeitplan ausführt (Standard: **Sonntag 3:00 Uhr**).
+
+**Funktionen:**
+- 45-Minuten-Ausführungstimeout
+- Vorab-Prüfungen: Speicherplatz, NTP-Synchronisation, apt-Lock-Erkennung
+- Konfigurations-Snapshots vor dem Update (`/var/backups/pihole-auto`)
+- Unbound-Konfigurationsvalidierung mit automatischem Rollback bei Fehler
+- DNS-Gesundheitsprüfungen (3 Versuche auf Port 53 und 5335)
+- Erkennung von Pi-hole-Hauptversionsänderungen
+- Duale Reboot-Signale: `/var/run/reboot-required`-Datei + Kernel-Mismatch-Erkennung
+- Reboot wird blockiert wenn DNS defekt ist (Sicherheitsschutz)
+- Optionale Webhook-Benachrichtigungen via `NOTIFY_URL`-Umgebungsvariable
+- Trockenlauf-Modus: `DRY_RUN=1 bash scripts/auto_update.sh`
+
+**Auto-Update-System aktivieren:**
+```bash
+# Option A: Über den Installer
+sudo ./install.sh --with-auto-update
+
+# Option B: Manuelle Einrichtung
+# 1. Wöchentlicher Auto-Update-Cron (Sonntag 3:00 Uhr)
+(sudo crontab -l 2>/dev/null; echo '0 3 * * 0 /home/pi/pi-hole-unbound-v6/scripts/auto_update.sh') | sudo crontab -
+
+# 2. Monatliche Unbound Root-Hints-Aktualisierung
+(sudo crontab -l 2>/dev/null; echo '0 4 1 * * curl -sf -o /var/lib/unbound/root.hints.new https://www.internic.net/domain/named.root && mv /var/lib/unbound/root.hints.new /var/lib/unbound/root.hints && systemctl restart unbound') | sudo crontab -
+
+# 3. Logrotate
+sudo cp config/logrotate-pihole-auto-update /etc/logrotate.d/pihole-auto-update
+
+# 4. Boot-Gesundheitsprüfung
+sudo cp config/pihole-boot-check.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable pihole-boot-check.service
+
+# 5. Erforderliche Verzeichnisse
+sudo mkdir -p /var/backups/pihole-auto /var/log/pihole-suite
+```
+
+**Webhook-Benachrichtigungen:**
+`NOTIFY_URL` setzen um Benachrichtigungen bei Update-Erfolg/-Fehler zu erhalten:
+```bash
+export NOTIFY_URL="https://hooks.slack.com/services/..."
+```
+
+**Boot-Gesundheitsprüfung** (`config/pihole-boot-check.service`):
+Eine systemd-Oneshot-Unit, die `scripts/boot_health_check.sh` nach jedem Neustart ausführt. Sie validiert Pi-hole- und Unbound-DNS, startet Dienste bei DNS-Ausfall automatisch neu und schreibt den Status nach `/var/tmp/pihole_boot_status`.
+
+---
+
 ## 📁 Repository-Struktur
 
 ```
-Pi-hole-Unbound-PiAlert-Setup/
+pi-hole-unbound-v6/
 ├── install.sh                     # Haupt-Installer
 ├── start_suite.py                 # Optionale REST-API (FastAPI/uvicorn)
 ├── requirements.txt               # Python-Abhängigkeiten
 ├── .env.example                   # Umgebungsvariablen-Vorlage
+├── config/
+│   ├── logrotate-pihole-auto-update   # Logrotate für Auto-Update-Logs
+│   └── pihole-boot-check.service      # Systemd-Oneshot: DNS-Prüfung nach Boot
 ├── scripts/
+│   ├── auto_update.sh             # Gehärteter wöchentlicher Auto-Update-Wrapper
+│   ├── boot_health_check.sh       # DNS-Validierung nach Neustart
 │   ├── console_menu.sh            # Interaktives Verwaltungsmenü
 │   ├── rescue_menu.sh             # Rescue & Backup Menü (sudo pihole-rescue)
 │   ├── post_install_check.sh      # Post-Install-Verifikation
@@ -232,6 +300,7 @@ Backups werden in `/home/pi/pihole-rescue-backups/` gespeichert und enthalten:
 
 `start_suite.py` ist eine **optionale** FastAPI-Anwendung für Monitoring.
 
+Konfiguration via `.env.example`:
 ```bash
 # Konfiguration
 cp .env.example .env
@@ -283,6 +352,18 @@ dig +short @127.0.0.1 -p 5335 google.com
 ```bash
 sudo bash scripts/post_install_check.sh --full
 sudo bash scripts/nightly_test.sh
+```
+
+### Alles ist kaputt
+Wenn DNS komplett ausgefallen ist und nichts mehr funktioniert:
+```bash
+sudo pihole-rescue   # Option 8: Emergency DNS Bypass (sofortiger Internetzugang)
+sudo pihole-rescue   # Option 7: Last-Known-Good (Backup wiederherstellen + prüfen)
+```
+
+Komplette Neuinstallation:
+```bash
+sudo ./install.sh --force
 ```
 
 ---

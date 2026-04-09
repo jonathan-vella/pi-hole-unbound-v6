@@ -5,7 +5,7 @@
 
 ## **One-Click DNS Security Stack**
 
-[![License](https://img.shields.io/github/license/TimInTech/Pi-hole-Unbound-PiAlert-Setup?style=for-the-badge&color=blue)](LICENSE)
+[![License](https://img.shields.io/github/license/jonathan-vella/pi-hole-unbound-v6?style=for-the-badge&color=blue)](LICENSE)
 [![Pi-hole](https://img.shields.io/badge/Pi--hole-v6.4-red?style=for-the-badge&logo=pihole)](https://pi-hole.net/)
 [![Unbound](https://img.shields.io/badge/Unbound-DNS-orange?style=for-the-badge)](https://nlnetlabs.nl/projects/unbound/)
 [![Debian](https://img.shields.io/badge/Debian-Bookworm%2FTrixie-red?style=for-the-badge&logo=debian)](https://debian.org/)
@@ -37,13 +37,26 @@ Pi-hole handles ad/tracker blocking; Unbound handles recursive DNS resolution wi
 ## ⚡ Quickstart
 
 ```bash
-git clone https://github.com/TimInTech/Pi-hole-Unbound-PiAlert-Setup.git
-cd Pi-hole-Unbound-PiAlert-Setup
+git clone https://github.com/jonathan-vella/pi-hole-unbound-v6.git
+cd pi-hole-unbound-v6
 chmod +x install.sh
 sudo ./install.sh
 ```
 
 > Clone as a **normal user** (`pi`), not root. The installer requires `sudo ./install.sh`.
+
+### Installer Options
+
+| Flag | Description |
+|------|-------------|
+| `--with-auto-update` | Install automated weekly update system (cron, logrotate, systemd boot check) |
+| `--with-netalertx` | Install NetAlertX network monitor (Docker) |
+| `--skip-python-api` | Skip the optional Python Suite API |
+| `--minimal` | Skip both NetAlertX and Python API |
+| `--force` | Force reinstall all components |
+| `--dry-run` | Simulate without making changes |
+| `--container-mode` | Run Pi-hole in Docker instead of host |
+| `--auto-remove-conflicts` | Auto-remove conflicting Docker packages |
 
 ---
 
@@ -91,9 +104,9 @@ This repo ships three complementary management interfaces:
 General-purpose interactive menu for everyday management.
 
 ```bash
-bash ~/Pi-hole-Unbound-PiAlert-Setup/scripts/console_menu.sh
+bash ~/pi-hole-unbound-v6/scripts/console_menu.sh
 # or with forced text mode:
-bash ~/Pi-hole-Unbound-PiAlert-Setup/scripts/console_menu.sh --text
+bash ~/pi-hole-unbound-v6/scripts/console_menu.sh --text
 ```
 
 ![Console Menu](docs/assets/screenshot_console_menu.png)
@@ -160,15 +173,70 @@ Available flags: `--no-apt`, `--no-upgrade`, `--no-gravity`, `--restart-ftl`, `-
 
 ---
 
+### 4. Automated Weekly Update (`scripts/auto_update.sh`)
+
+A hardened unattended update wrapper that runs `pihole_maintenance_pro.sh` on a weekly schedule (default: **Sunday 3 AM**).
+
+**Features:**
+- 45-minute execution timeout
+- Pre-flight checks: disk space, NTP sync, apt lock detection
+- Pre-update config snapshots (`/var/backups/pihole-auto`)
+- Unbound config validation with automatic rollback on failure
+- DNS health checks (3 retries on port 53 and 5335)
+- Major Pi-hole version detection (warns before major upgrades)
+- Dual reboot signals: `/var/run/reboot-required` file + kernel mismatch detection
+- Reboot blocked when DNS is broken (safety guard)
+- Optional webhook notifications via `NOTIFY_URL` environment variable
+- Dry-run mode: `DRY_RUN=1 bash scripts/auto_update.sh`
+
+**Enable the auto-update system:**
+```bash
+# Option A: Use the installer
+sudo ./install.sh --with-auto-update
+
+# Option B: Manual setup
+# 1. Weekly auto-update cron (Sunday 3 AM)
+(sudo crontab -l 2>/dev/null; echo '0 3 * * 0 /home/pi/pi-hole-unbound-v6/scripts/auto_update.sh') | sudo crontab -
+
+# 2. Monthly Unbound root hints refresh
+(sudo crontab -l 2>/dev/null; echo '0 4 1 * * curl -sf -o /var/lib/unbound/root.hints.new https://www.internic.net/domain/named.root && mv /var/lib/unbound/root.hints.new /var/lib/unbound/root.hints && systemctl restart unbound') | sudo crontab -
+
+# 3. Logrotate
+sudo cp config/logrotate-pihole-auto-update /etc/logrotate.d/pihole-auto-update
+
+# 4. Boot health check service
+sudo cp config/pihole-boot-check.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable pihole-boot-check.service
+
+# 5. Required directories
+sudo mkdir -p /var/backups/pihole-auto /var/log/pihole-suite
+```
+
+**Webhook notifications:**
+Set `NOTIFY_URL` to receive alerts on update success/failure:
+```bash
+export NOTIFY_URL="https://hooks.slack.com/services/..."
+```
+
+**Boot health check** (`config/pihole-boot-check.service`):
+A systemd oneshot unit that runs `scripts/boot_health_check.sh` after every reboot. It validates Pi-hole and Unbound DNS, auto-restarts services if DNS is down, and writes status to `/var/tmp/pihole_boot_status`.
+
+---
+
 ## 📁 Repository Structure
 
 ```
-Pi-hole-Unbound-PiAlert-Setup/
+pi-hole-unbound-v6/
 ├── install.sh                     # Main installer
 ├── start_suite.py                 # Optional REST API (FastAPI/uvicorn)
 ├── requirements.txt               # Python deps for Suite API
 ├── .env.example                   # Environment variables template
+├── config/
+│   ├── logrotate-pihole-auto-update   # Logrotate for auto-update logs
+│   └── pihole-boot-check.service      # Systemd oneshot: post-boot DNS check
 ├── scripts/
+│   ├── auto_update.sh             # Hardened weekly auto-update wrapper
+│   ├── boot_health_check.sh       # Post-reboot DNS validation
 │   ├── console_menu.sh            # Interactive management menu
 │   ├── rescue_menu.sh             # Rescue & backup menu (sudo pihole-rescue)
 │   ├── post_install_check.sh      # Post-install verification
@@ -234,6 +302,7 @@ Backups are stored in `/home/pi/pihole-rescue-backups/` and include:
 
 `start_suite.py` is an **optional** FastAPI server providing a JSON API for monitoring.
 
+Configure via `.env.example`:
 ```bash
 # Setup
 cp .env.example .env
@@ -285,6 +354,18 @@ dig +short @127.0.0.1 -p 5335 google.com
 ```bash
 sudo bash scripts/post_install_check.sh --full
 sudo bash scripts/nightly_test.sh
+```
+
+### Everything is broken
+If DNS is completely non-functional and nothing else works:
+```bash
+sudo pihole-rescue   # Option 8: Emergency DNS bypass (immediate internet access)
+sudo pihole-rescue   # Option 7: Last-Known-Good restore (restore + verify)
+```
+
+To completely reinstall from scratch:
+```bash
+sudo ./install.sh --force
 ```
 
 ---

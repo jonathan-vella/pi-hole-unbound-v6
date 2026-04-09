@@ -1,0 +1,16 @@
+[Unit]
+Description=Pi-hole + Unbound post-boot DNS health check
+After=network-online.target pihole-FTL.service unbound.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# NOTE: install.sh --with-auto-update rewrites ExecStart to the actual repo path.
+ExecStart=/usr/local/lib/pihole-suite/boot_health_check.sh
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
