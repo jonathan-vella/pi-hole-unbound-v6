@@ -24,7 +24,7 @@ Scope: checked current repository changes against `docs/OPTIMIZATION_PLAN.md` it
 | 14. Bound API File Reads And Expensive Checks | Partial | Bounded tail reads and limit clamps exist. TTL caching for expensive derived stats was not added. |
 | 15. Centralize Pi-hole Upstream Handling | Partial | Python uses `tomllib`; installer dry-run/backup churn improved. Shell-side upstream parsing/writing is still duplicated in installer, rescue, and post-install check. |
 | 16. Centralize DNS And Service Health Checks | Partial | `scripts/lib/health.sh` is added and used by auto-update and boot health. Installer, post-install check, rescue menu, and maintenance still have duplicate health/service checks. |
-| 17. Make Container Images Configurable And Pinned | Mostly complete | `PIHOLE_IMAGE` and `NETALERTX_IMAGE` are configurable and documented with production pinning guidance. Defaults remain `latest`, which the plan allowed only if documented. |
+| 17. Make Container Images Configurable And Pinned | Complete | `PIHOLE_IMAGE` and `NETALERTX_IMAGE` are configurable and default to pinned stable tags. |
 | 18. Harden Root Hints Refresh | Complete | `scripts/root_hints_refresh.sh` validates downloads and is used by cron and installer Unbound configuration. |
 | 19. Avoid Unnecessary Installer Backup Churn | Complete | Pi-hole TOML fast-path now runs before backup creation. |
 | 20. Persist Unattended Notification Configuration | Complete | Auto-update sources `/etc/pihole-suite/pihole-suite.env`; systemd unit uses `EnvironmentFile`; docs updated. |
@@ -42,8 +42,7 @@ Scope: checked current repository changes against `docs/OPTIMIZATION_PLAN.md` it
 2. Expand `start_suite.py` tests to all documented endpoints and subprocess failure paths.
 3. Finish shared Pi-hole upstream helpers across installer, rescue, post-install check, and API.
 4. Extend `scripts/lib/health.sh` adoption to installer, post-install check, rescue menu, and maintenance scripts.
-5. Decide whether to pin non-`latest` default container image tags, or keep current defaults with documented production override guidance.
-6. Run CI and the manual acceptance checklist on a disposable Debian/Raspberry Pi OS host.
+5. Run CI and the manual acceptance checklist on a disposable Debian/Raspberry Pi OS host.
 
 ## Validation Performed In Workspace
 

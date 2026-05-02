@@ -19,8 +19,8 @@ Persistent runtime configuration lives in `/etc/pihole-suite/pihole-suite.env`. 
 | `PIHOLE_BACKUP_DIR` | `/var/backups/pihole-suite/rescue` | Rescue backup directory. |
 | `PIHOLE_MAINT_BACKUP_DIR` | `/var/backups/pihole-suite/maintenance` | Maintenance backup directory. |
 | `PIHOLE_MAINT_BACKUP_RETENTION` | `5` | Number of maintenance backups to keep. |
-| `PIHOLE_IMAGE` | `pihole/pihole:latest` | Optional Pi-hole container image override. Pin an explicit tag in production. |
-| `NETALERTX_IMAGE` | `jokobsk/netalertx:latest` | Optional NetAlertX container image override. Pin an explicit tag in production. |
+| `PIHOLE_IMAGE` | `pihole/pihole:2026.04.1` | Optional Pi-hole container image override. Defaults to a pinned stable tag. |
+| `NETALERTX_IMAGE` | `jokobsk/netalertx:26.4.6` | Optional NetAlertX container image override. Defaults to a pinned stable tag. |
 | `DRY_RUN` | unset | For `scripts/auto_update.sh`, `DRY_RUN=1` simulates without snapshots, status writes, maintenance, service restarts, notifications, or reboot. |
 
 Installer `--dry-run` is a pure simulation: it must not create persistent files, modify installer state, alter cron/systemd, edit resolver files, install packages, or rewrite Pi-hole/Unbound configuration.

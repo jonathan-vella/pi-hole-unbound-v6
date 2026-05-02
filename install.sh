@@ -78,8 +78,8 @@ NETALERTX_PORT=20211
 PYTHON_SUITE_PORT=8090
 CONTAINER_PIHOLE_DNS_PORT=8053
 CONTAINER_PIHOLE_WEB_PORT=8080
-PIHOLE_IMAGE="${PIHOLE_IMAGE:-pihole/pihole:latest}"
-NETALERTX_IMAGE="${NETALERTX_IMAGE:-jokobsk/netalertx:latest}"
+PIHOLE_IMAGE="${PIHOLE_IMAGE:-pihole/pihole:2026.04.1}"
+NETALERTX_IMAGE="${NETALERTX_IMAGE:-jokobsk/netalertx:26.4.6}"
 
 # =============================================
 # LOGGING

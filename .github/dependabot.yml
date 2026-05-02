@@ -21,10 +21,6 @@ updates:
           - "fastapi"
           - "uvicorn"
           - "pydantic"
-          - "requests"
-          - "httpx"
-          - "typing-extensions"
-          - "colorlog"
         update-types:
           - "minor"
           - "patch"
@@ -32,6 +28,7 @@ updates:
         patterns:
           - "ruff"
           - "pytest"
+          - "httpx"
         update-types:
           - "minor"
           - "patch"
