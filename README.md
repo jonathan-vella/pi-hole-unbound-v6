@@ -10,11 +10,8 @@
 [![Unbound](https://img.shields.io/badge/Unbound-DNS-orange?style=for-the-badge)](https://nlnetlabs.nl/projects/unbound/)
 [![Debian](https://img.shields.io/badge/Debian-Bookworm%2FTrixie-red?style=for-the-badge&logo=debian)](https://debian.org/)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue?style=for-the-badge&logo=python)](https://python.org/)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=000&style=for-the-badge)](https://buymeacoffee.com/timintech)
 
 <img src="https://skillicons.dev/icons?i=linux,debian,raspberrypi,bash,python,fastapi" alt="Tech Stack" />
-
-**🌐 Languages:** 🇬🇧 English (this file) • [🇩🇪 Deutsch](README.de.md)
 
 </div>
 <!-- markdownlint-enable MD033 MD041 -->
@@ -175,6 +172,8 @@ sudo bash tools/pihole_maintenance_pro.sh --no-apt --no-upgrade
 
 Available flags: `--no-apt`, `--no-upgrade`, `--no-gravity`, `--restart-ftl`, `--backup`, `--json`
 
+When `--backup` is used, maintenance snapshots are stored under `/var/backups/pihole-suite/maintenance/` by default. Override with `PIHOLE_MAINT_BACKUP_DIR` and control retention with `PIHOLE_MAINT_BACKUP_RETENTION`.
+
 ---
 
 ### 4. Automated Weekly Update (`scripts/auto_update.sh`)
@@ -203,6 +202,7 @@ sudo ./install.sh --with-auto-update
 sudo install -d -m 0755 /usr/local/lib/pihole-suite/scripts /usr/local/lib/pihole-suite/scripts/lib /usr/local/lib/pihole-suite/tools
 sudo install -m 0755 scripts/auto_update.sh scripts/boot_health_check.sh scripts/root_hints_refresh.sh /usr/local/lib/pihole-suite/scripts/
 sudo install -m 0644 scripts/lib/ui.sh /usr/local/lib/pihole-suite/scripts/lib/ui.sh
+sudo install -m 0644 scripts/lib/health.sh /usr/local/lib/pihole-suite/scripts/lib/health.sh
 sudo install -m 0755 tools/pihole_maintenance_pro.sh /usr/local/lib/pihole-suite/tools/pihole_maintenance_pro.sh
 
 # 1. Weekly auto-update cron (Sunday 3 AM)
@@ -219,7 +219,7 @@ sudo cp config/pihole-boot-check.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable pihole-boot-check.service
 
 # 5. Required directories
-sudo install -d -m 0700 /var/backups/pihole-suite /var/backups/pihole-suite/auto-update
+sudo install -d -m 0700 /var/backups/pihole-suite /var/backups/pihole-suite/auto-update /var/backups/pihole-suite/maintenance /var/backups/pihole-suite/rescue
 sudo install -d -m 0750 /var/log/pihole-suite
 ```
 
@@ -257,6 +257,7 @@ pi-hole-unbound-v6/
 │   ├── nightly_test.sh            # Nightly DNS/service test
 │   ├── repo_selftest.sh           # Repo integrity self-test
 │   └── lib/
+│       ├── health.sh              # Shared DNS health helpers
 │       └── ui.sh                  # Shared UI library (colors, log helpers)
 ├── tools/
 │   └── pihole_maintenance_pro.sh  # Batch maintenance script
@@ -264,6 +265,7 @@ pi-hole-unbound-v6/
     ├── CONSOLE_MENU.md            # Full menu documentation
     ├── ACCEPTANCE_TESTS.md        # Manual validation checklist
     ├── CONFIGURATION.md           # Runtime configuration variables
+    ├── PLAN_IMPLEMENTATION_AUDIT.md # Optimization plan implementation audit
     ├── SHELL_AND_CONFIG_RULES.md  # Contributor safety rules
     └── assets/                    # Screenshots
 ```
