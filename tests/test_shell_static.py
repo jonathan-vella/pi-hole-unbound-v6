@@ -76,3 +76,20 @@ def test_maintenance_backups_use_suite_backup_root() -> None:
     assert 'MAINT_BACKUP_ROOT="${PIHOLE_MAINT_BACKUP_DIR:-${BACKUP_ROOT}/maintenance}"' in maintenance
     assert 'install -d -m 0700 -o root -g root "$BACKUP_ROOT" "$MAINT_BACKUP_ROOT" "$backup_dir"' in maintenance
     assert 'prune_maintenance_backups "$MAINT_BACKUP_RETENTION"' in maintenance
+
+
+def test_repo_selftest_distinguishes_entrypoints_from_libraries() -> None:
+    selftest = read_repo_file("scripts/repo_selftest.sh")
+
+    assert "list_executable_shell_scripts()" in selftest
+    assert "done < <(list_shell_scripts)" in selftest
+    assert "done < <(list_executable_shell_scripts)" in selftest
+    assert "Optional localized README missing: README.de.md" in selftest
+
+
+def test_post_install_check_reports_multiline_upstreams_cleanly() -> None:
+    post_install = read_repo_file("scripts/post_install_check.sh")
+
+    assert "in_dns && collecting" in post_install
+    assert "upstreams_compact" in post_install
+    assert 'pass "Pi-hole v6 upstreams configured correctly: 127.0.0.1#${expected_port}"' in post_install

@@ -360,9 +360,21 @@ check_pihole_v6_config() {
     upstreams=$(sudo awk '
       /^\[dns\]/ { in_dns=1; next }
       /^\[/ && !/^\[dns\]/ { in_dns=0 }
+      in_dns && collecting {
+        print
+        if ($0 ~ /\]/) {
+          found=1
+          collecting=0
+        }
+        next
+      }
       in_dns && /^[[:space:]]*upstreams[[:space:]]*=/ {
         print
-        found=1
+        if ($0 ~ /\]/) {
+          found=1
+        } else {
+          collecting=1
+        }
       }
       END { if (!found) print "NOT_FOUND" }
     ' "$toml_file")
@@ -370,9 +382,21 @@ check_pihole_v6_config() {
     upstreams=$(awk '
       /^\[dns\]/ { in_dns=1; next }
       /^\[/ && !/^\[dns\]/ { in_dns=0 }
+      in_dns && collecting {
+        print
+        if ($0 ~ /\]/) {
+          found=1
+          collecting=0
+        }
+        next
+      }
       in_dns && /^[[:space:]]*upstreams[[:space:]]*=/ {
         print
-        found=1
+        if ($0 ~ /\]/) {
+          found=1
+        } else {
+          collecting=1
+        }
       }
       END { if (!found) print "NOT_FOUND" }
     ' "$toml_file" 2>/dev/null || printf "NOT_FOUND")
@@ -383,10 +407,11 @@ check_pihole_v6_config() {
     warn "Pi-hole will use public DNS resolvers instead of Unbound!"
   else
     local expected_port="${UNBOUND_PORT:-5335}"
-    if grep -q "127.0.0.1#${expected_port}" "$toml_file"; then
-      pass "Pi-hole v6 upstreams configured correctly: $upstreams"
+    local upstreams_compact="${upstreams//$'\n'/ }"
+    if printf '%s\n' "$upstreams" | grep -q "127.0.0.1#${expected_port}"; then
+      pass "Pi-hole v6 upstreams configured correctly: 127.0.0.1#${expected_port}"
     else
-      warn "Pi-hole v6 upstreams found but NOT pointing to Unbound port ${expected_port}: $upstreams"
+      warn "Pi-hole v6 upstreams found but NOT pointing to Unbound port ${expected_port}: $upstreams_compact"
     fi
   fi
 }

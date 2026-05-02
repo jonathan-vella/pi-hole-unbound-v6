@@ -104,7 +104,7 @@ test_bash_syntax() {
     else
       fail "Syntax ERROR: $script"
     fi
-  done < <(list_executable_shell_scripts)
+  done < <(list_shell_scripts)
 }
 
 test_executable_bits() {
@@ -135,7 +135,7 @@ test_executable_bits() {
         warn "NOT executable on filesystem: $script"
       fi
     fi
-  done < <(list_shell_scripts)
+  done < <(list_executable_shell_scripts)
 }
 
 test_line_endings() {
