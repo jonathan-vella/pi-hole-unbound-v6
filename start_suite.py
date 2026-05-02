@@ -28,14 +28,79 @@ import re
 import hmac
 import subprocess
 import time
+from collections import deque
 from typing import Any
 from urllib.request import Request, urlopen
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field
 import uvicorn
 
 APP_VERSION = "1.0.0"
 START_TIME = time.time()
+MAX_TAIL_LINES = 5000
+
+
+class HealthResponse(BaseModel):
+    ok: bool
+    message: str
+    version: str
+    uptime_seconds: int = Field(ge=0)
+
+
+class VersionResponse(BaseModel):
+    app: str
+    version: str
+    uptime_seconds: int = Field(ge=0)
+
+
+class UrlsResponse(BaseModel):
+    host_ip: str
+    pihole_admin: str
+    netalertx: str
+    suite_local: str
+    note: str
+
+
+class PiholeResponse(BaseModel):
+    pihole_version: str
+    ftl_active: bool
+    upstreams: list[str]
+
+
+class UnboundResponse(BaseModel):
+    port: int = Field(ge=1, le=65535)
+    service_active: bool
+    dig_ok: bool
+    dig_result: str
+
+
+class NetalertxResponse(BaseModel):
+    port: int = Field(ge=1, le=65535)
+    url_local: str
+    http_reachable: bool
+
+
+class DnsLogEntry(BaseModel):
+    timestamp: str
+    client: str
+    query: str
+    action: str
+
+
+class DhcpLease(BaseModel):
+    ip: str
+    mac: str
+    hostname: str
+    lease_start: str | None
+    lease_end: str | None
+
+
+class StatsResponse(BaseModel):
+    total_dns_logs: int = Field(ge=0)
+    total_devices: int = Field(ge=0)
+    recent_queries: int = Field(ge=0)
+    note: str
 
 
 def _env(name: str, default: str | None = None) -> str:
@@ -59,10 +124,10 @@ app = FastAPI(title="Pi-hole Suite API", version=APP_VERSION)
 
 
 def _read_lines(path: str, limit: int) -> list[str]:
+    tail_limit = max(1, min(limit, MAX_TAIL_LINES))
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        return lines[-limit:]
+            return list(deque(f, maxlen=tail_limit))
     except OSError:
         return []
 
@@ -191,8 +256,18 @@ def _read_pihole_v6_upstreams() -> list[str]:
     except OSError:
         return []
 
-    # Very small parser: look for upstreams = ["127.0.0.1#5335", ...]
-    m = re.search(r"^upstreams\s*=\s*\[(.*?)\]", t, flags=re.M)
+    try:
+        import tomllib
+
+        parsed = tomllib.loads(t)
+        upstreams = parsed.get("dns", {}).get("upstreams", [])
+        if isinstance(upstreams, list):
+            return [str(item) for item in upstreams]
+    except (TypeError, ValueError):
+        pass
+
+    # Fallback parser for constrained environments.
+    m = re.search(r"^\s*upstreams\s*=\s*\[(.*?)\]", t, flags=re.M | re.S)
     if not m:
         return []
 
@@ -200,62 +275,62 @@ def _read_pihole_v6_upstreams() -> list[str]:
     return [s.strip().strip('"') for s in inner.split(",") if s.strip()]
 
 
-@app.get("/health", dependencies=[Depends(require_api_key)])
-def health() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "message": "Pi-hole Suite API is running",
-        "version": APP_VERSION,
-        "uptime_seconds": int(time.time() - START_TIME),
-    }
+@app.get("/health", dependencies=[Depends(require_api_key)], response_model=HealthResponse)
+def health() -> HealthResponse:
+    return HealthResponse(
+        ok=True,
+        message="Pi-hole Suite API is running",
+        version=APP_VERSION,
+        uptime_seconds=int(time.time() - START_TIME),
+    )
 
 
-@app.get("/version", dependencies=[Depends(require_api_key)])
-def version() -> dict[str, Any]:
-    return {
-        "app": "pihole-suite",
-        "version": APP_VERSION,
-        "uptime_seconds": int(time.time() - START_TIME),
-    }
+@app.get("/version", dependencies=[Depends(require_api_key)], response_model=VersionResponse)
+def version() -> VersionResponse:
+    return VersionResponse(
+        app="pihole-suite",
+        version=APP_VERSION,
+        uptime_seconds=int(time.time() - START_TIME),
+    )
 
 
-@app.get("/urls", dependencies=[Depends(require_api_key)])
-def urls() -> dict[str, Any]:
+@app.get("/urls", dependencies=[Depends(require_api_key)], response_model=UrlsResponse)
+def urls() -> UrlsResponse:
     host_ip = _guess_host_ip()
     suite_port = int(_env("SUITE_PORT", default="8090"))
     netalertx_port = int(_env("NETALERTX_PORT", default="20211"))
 
-    return {
-        "host_ip": host_ip,
-        "pihole_admin": f"http://{host_ip}/admin",
-        "netalertx": f"http://{host_ip}:{netalertx_port}",
-        "suite_local": f"http://127.0.0.1:{suite_port}",
-        "note": "Suite binds to 127.0.0.1 by default; access remotely via a reverse proxy if needed.",
-    }
+    return UrlsResponse(
+        host_ip=host_ip,
+        pihole_admin=f"http://{host_ip}/admin",
+        netalertx=f"http://{host_ip}:{netalertx_port}",
+        suite_local=f"http://127.0.0.1:{suite_port}",
+        note="Suite binds to 127.0.0.1 by default; access remotely via a reverse proxy if needed.",
+    )
 
 
-@app.get("/pihole", dependencies=[Depends(require_api_key)])
-def pihole() -> dict[str, Any]:
+@app.get("/pihole", dependencies=[Depends(require_api_key)], response_model=PiholeResponse)
+def pihole() -> PiholeResponse:
     v = _run(["pihole", "-v"], timeout=2.0)
     ftl = _run(["systemctl", "is-active", "pihole-FTL"], timeout=2.0)
     upstreams = _read_pihole_v6_upstreams()
 
-    return {
-        "pihole_version": v.get("stdout", "") if v.get("ok") else "unknown",
-        "ftl_active": (ftl.get("ok") and ftl.get("returncode") == 0),
-        "upstreams": upstreams,
-    }
+    return PiholeResponse(
+        pihole_version=v.get("stdout", "") if v.get("ok") else "unknown",
+        ftl_active=(ftl.get("ok") and ftl.get("returncode") == 0),
+        upstreams=upstreams,
+    )
 
 
-@app.get("/unbound", dependencies=[Depends(require_api_key)])
-def unbound() -> dict[str, Any]:
+@app.get("/unbound", dependencies=[Depends(require_api_key)], response_model=UnboundResponse)
+def unbound() -> UnboundResponse:
     unbound_port = int(_env("UNBOUND_PORT", default="5335"))
     svc = _run(["systemctl", "is-active", "unbound"], timeout=2.0)
     dig = _run(
         [
             "dig",
             "+short",
-            f"@127.0.0.1",
+            "@127.0.0.1",
             "-p",
             str(unbound_port),
             "+time=1",
@@ -267,31 +342,31 @@ def unbound() -> dict[str, Any]:
 
     ok = bool(dig.get("ok") and dig.get("stdout"))
 
-    return {
-        "port": unbound_port,
-        "service_active": (svc.get("ok") and svc.get("returncode") == 0),
-        "dig_ok": ok,
-        "dig_result": dig.get("stdout", ""),
-    }
+    return UnboundResponse(
+        port=unbound_port,
+        service_active=(svc.get("ok") and svc.get("returncode") == 0),
+        dig_ok=ok,
+        dig_result=dig.get("stdout", ""),
+    )
 
 
-@app.get("/netalertx", dependencies=[Depends(require_api_key)])
-def netalertx() -> dict[str, Any]:
+@app.get("/netalertx", dependencies=[Depends(require_api_key)], response_model=NetalertxResponse)
+def netalertx() -> NetalertxResponse:
     port = int(_env("NETALERTX_PORT", default="20211"))
     url = f"http://127.0.0.1:{port}/"
     reachable = _http_ok(url)
 
-    return {
-        "port": port,
-        "url_local": url,
-        "http_reachable": reachable,
-    }
+    return NetalertxResponse(
+        port=port,
+        url_local=url,
+        http_reachable=reachable,
+    )
 
 
-@app.get("/dns", dependencies=[Depends(require_api_key)])
-def dns(limit: int = 50) -> list[dict[str, Any]]:
+@app.get("/dns", dependencies=[Depends(require_api_key)], response_model=list[DnsLogEntry])
+def dns(limit: int = 50) -> list[DnsLogEntry]:
     limit = max(1, min(limit, 500))
-    return _parse_pihole_log(limit)
+    return [DnsLogEntry(**entry) for entry in _parse_pihole_log(limit)]
 
 
 @app.get("/devices", dependencies=[Depends(require_api_key)])
@@ -301,21 +376,21 @@ def devices() -> list[dict[str, Any]]:
     return []
 
 
-@app.get("/leases", dependencies=[Depends(require_api_key)])
-def leases(limit: int = 200) -> list[dict[str, Any]]:
+@app.get("/leases", dependencies=[Depends(require_api_key)], response_model=list[DhcpLease])
+def leases(limit: int = 200) -> list[DhcpLease]:
     limit = max(1, min(limit, 2000))
-    return _parse_dhcp_leases(limit)
+    return [DhcpLease(**lease) for lease in _parse_dhcp_leases(limit)]
 
 
-@app.get("/stats", dependencies=[Depends(require_api_key)])
-def stats() -> dict[str, Any]:
+@app.get("/stats", dependencies=[Depends(require_api_key)], response_model=StatsResponse)
+def stats() -> StatsResponse:
     recent = _parse_pihole_log(100)
-    return {
-        "total_dns_logs": len(recent),
-        "total_devices": 0,
-        "recent_queries": len(recent),
-        "note": "DNS stats are derived from best-effort log parsing; may be empty depending on Pi-hole logging/permissions.",
-    }
+    return StatsResponse(
+        total_dns_logs=len(recent),
+        total_devices=0,
+        recent_queries=len(recent),
+        note="DNS stats are derived from best-effort log parsing; may be empty depending on Pi-hole logging/permissions.",
+    )
 
 
 def main() -> None:

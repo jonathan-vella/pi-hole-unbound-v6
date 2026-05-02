@@ -62,6 +62,9 @@ DO_DNSRELOAD=1 # no-op on v6, retained for help text compatibility
 JSON_OUTPUT=0
 DO_BACKUP=0
 RESTART_FTL=0
+BACKUP_ROOT="${PIHOLE_BACKUP_ROOT:-/var/backups/pihole-suite}"
+MAINT_BACKUP_ROOT="${PIHOLE_MAINT_BACKUP_DIR:-${BACKUP_ROOT}/maintenance}"
+MAINT_BACKUP_RETENTION="${PIHOLE_MAINT_BACKUP_RETENTION:-5}"
 while (("$#")); do
   case "$1" in
     --no-apt)
@@ -492,31 +495,39 @@ if [[ -f "$PIHOLE_LOG" ]]; then
 fi
 
 # Backup-Integration (optional)
-if ((DO_BACKUP == 1)); then
-  BACKUP_DIR="/var/backups/pihole/$(date +%Y%m%d_%H%M%S)"
-  MAX_BACKUPS=5
-  mkdir -p "$BACKUP_DIR"
-  cp -a /etc/pihole/gravity.db "$BACKUP_DIR" 2> /dev/null || true
-  cp -a /etc/pihole/pihole-FTL.db "$BACKUP_DIR" 2> /dev/null || true
-  cp -a /etc/pihole/pihole.toml "$BACKUP_DIR" 2> /dev/null || true
-  cp -a /etc/pihole/hosts/*.list "$BACKUP_DIR" 2> /dev/null || true
-  echo "Backup gespeichert: $BACKUP_DIR"
-  find /var/backups/pihole/ -maxdepth 1 -type d -printf '%T@ %p\n' | sort -n | awk '{print $2}' | head -n -$MAX_BACKUPS | xargs -r rm -rf
-fi
 backup_pihole() {
   local backup_dir
-  backup_dir="/etc/pihole/backup_$(date +%Y%m%d_%H%M%S)"
-  mkdir -p "$backup_dir"
+  backup_dir="${MAINT_BACKUP_ROOT}/$(date +%Y%m%d_%H%M%S_%N)"
+  install -d -m 0700 -o root -g root "$BACKUP_ROOT" "$MAINT_BACKUP_ROOT" "$backup_dir"
   cp -a /etc/pihole/*.db "$backup_dir" 2> /dev/null || true
   cp -a /etc/pihole/pihole.toml "$backup_dir" 2> /dev/null || true
   cp -a /etc/pihole/hosts/*.list "$backup_dir" 2> /dev/null || true
   echo "Backup erstellt: $backup_dir"
 }
 
+prune_maintenance_backups() {
+  local keep="${1:-$MAINT_BACKUP_RETENTION}"
+  local -a old_backups=()
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=5
+  ((keep > 0)) || keep=5
+
+  mapfile -t old_backups < <(find "$MAINT_BACKUP_ROOT" -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' 2> /dev/null | sort -rn | awk -v keep="$keep" 'NR > keep {print $2}')
+  local old_backup
+  for old_backup in "${old_backups[@]}"; do
+    rm -rf "$old_backup" && echo "Altes Backup entfernt: $old_backup"
+  done
+}
+
+if ((DO_BACKUP == 1)); then
+  backup_pihole
+  prune_maintenance_backups "$MAINT_BACKUP_RETENTION"
+fi
+
 # 03 – Pi-hole Version & Updates
 run_step 03 "🔎" "Pi-hole Version" "\"$PIHOLE_BIN\" -v" false true
 if ((DO_UPGRADE == 1)); then
   backup_pihole
+  prune_maintenance_backups "$MAINT_BACKUP_RETENTION"
   run_step 04 "🆙" "Pi-hole self-update" "\"$PIHOLE_BIN\" -up"
 else
   printf '%sPi-hole Upgrade übersprungen (--no-upgrade).%s\n' "$YELLOW" "$NC"
@@ -525,6 +536,7 @@ fi
 # 05 – Gravity
 if ((DO_GRAVITY == 1)); then
   backup_pihole
+  prune_maintenance_backups "$MAINT_BACKUP_RETENTION"
   run_step 05 "📋" "Update Gravity / Blocklists" "\"$PIHOLE_BIN\" -g"
 else
   printf '%sGravity-Update übersprungen (--no-gravity).%s\n' "$YELLOW" "$NC"

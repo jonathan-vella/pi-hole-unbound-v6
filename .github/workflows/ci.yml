@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          go install mvdan.cc/sh/v3/cmd/shfmt@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Validate shell syntax
+        run: |
+          bash -n install.sh
+          find scripts tools -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+
+      - name: Run repository self-test
+        run: bash scripts/repo_selftest.sh
+
+      - name: Run ShellCheck
+        run: shellcheck -x install.sh scripts/*.sh scripts/lib/*.sh tools/*.sh
+
+      - name: Check shell formatting
+        run: shfmt -d install.sh scripts tools
+
+      - name: Compile Python
+        run: python -m py_compile start_suite.py
+
+      - name: Lint Python
+        run: ruff check .
+
+      - name: Run tests
+        run: pytest -q

@@ -96,17 +96,17 @@ sudo bash scripts/rescue_menu.sh
 
 | # | Option | What It Does |
 |---|--------|-------------|
-| 4 | Create backup now | Backs up `pihole.toml`, `/etc/unbound`, systemd drop-ins to `/home/pi/pihole-rescue-backups/` |
+| 4 | Create backup now | Backs up `pihole.toml`, `/etc/unbound`, systemd drop-ins to `/var/backups/pihole-suite/rescue/` |
 | 5 | Restore from backup | Shows list of available backups, confirms before restoring, verifies DNS |
 | 6 | Delete old backups | Keeps newest or removes backups older than 14 days |
 
 ![Backup](assets/screenshot_backup.png)
 
-**Backup location:** `/home/pi/pihole-rescue-backups/YYYYMMDD_HHMMSS/`
+**Backup location:** `/var/backups/pihole-suite/rescue/YYYYMMDD_HHMMSS/`
 
 **Contents per backup:**
 - `pihole.toml` — Pi-hole v6 config
-- `unbound/` — all files from `/etc/unbound/unbound.conf.d/`
+- `unbound/` — all files from `/etc/unbound/`
 - `systemd/` — pihole-FTL and unbound drop-in files
 
 #### Rescue Operations
@@ -154,13 +154,18 @@ Colors are automatically disabled when:
 
 | Path | Description |
 |------|-------------|
-| `/usr/local/bin/pihole-rescue` | Global symlink → `scripts/rescue_menu.sh` |
+| `/usr/local/bin/pihole-rescue` | Global symlink to the root-owned rescue runtime copy |
+| `/usr/local/lib/pihole-suite/` | Root-owned runtime copies for unattended cron/systemd scripts |
 | `/home/pi/pihole-rescue-menu` | User alias |
-| `/home/pi/pihole-rescue-backups/` | Backup storage |
-| `/var/log/pihole-rescue-menu.log` | Rescue menu session log |
+| `/var/backups/pihole-suite/rescue/` | Rescue backup storage |
+| `/home/pi/pihole-rescue-backups/` | Legacy backup location for migration only |
+| `/var/log/pihole-suite/rescue_menu.log` | Rescue menu session log |
 | `/var/log/pihole_maintenance_pro_*.log` | Maintenance Pro logs |
 | `/var/log/pihole-suite/auto_update.log` | Auto-update log |
-| `/var/backups/pihole-auto/` | Pre-update config snapshots |
+| `/var/log/pihole-suite/root_hints_refresh.log` | Root hints refresh log |
+| `/var/backups/pihole-suite/auto-update/` | Pre-update config snapshots |
+| `/var/backups/pihole-suite/maintenance/` | Maintenance backup storage |
+| `/etc/pihole-suite/pihole-suite.env` | Persistent suite config and unattended notification settings |
 | `/var/tmp/pihole_boot_status` | Boot health check status |
 
 ---

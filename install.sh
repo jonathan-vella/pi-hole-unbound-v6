@@ -18,6 +18,8 @@ fi
 LOG_DIR="/var/log/pihole-suite"
 STATE_DIR="/var/lib/pihole-suite"
 ENV_DIR="/etc/pihole-suite"
+RUNTIME_DIR="/usr/local/lib/pihole-suite"
+BACKUP_ROOT="${PIHOLE_BACKUP_ROOT:-/var/backups/pihole-suite}"
 
 LOG_FILE="${LOG_DIR}/install.log"
 ERROR_LOG="${LOG_DIR}/install_errors.log"
@@ -65,6 +67,10 @@ AUTO_REMOVE_CONFLICTS=false
 INSTALL_NETALERTX=false
 INSTALL_PYTHON_SUITE=true
 INSTALL_AUTO_UPDATE=false
+DISABLE_AUTO_UPDATE=false
+UNINSTALL_AUTO_UPDATE=false
+UNINSTALL_SUITE_TOOLS=false
+ASSUME_YES=false
 
 # Ports
 UNBOUND_PORT=5335
@@ -72,6 +78,8 @@ NETALERTX_PORT=20211
 PYTHON_SUITE_PORT=8090
 CONTAINER_PIHOLE_DNS_PORT=8053
 CONTAINER_PIHOLE_WEB_PORT=8080
+PIHOLE_IMAGE="${PIHOLE_IMAGE:-pihole/pihole:latest}"
+NETALERTX_IMAGE="${NETALERTX_IMAGE:-jokobsk/netalertx:latest}"
 
 # =============================================
 # LOGGING
@@ -90,7 +98,7 @@ init_runtime_paths() {
   fi
 
   # Ensure log dir exists; fall back to repo dir if it cannot be used.
-  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+  if [[ "$DRY_RUN" != true && ${EUID:-$(id -u)} -eq 0 ]]; then
     mkdir -p "$LOG_DIR" 2>/dev/null || true
     chmod 0755 "$LOG_DIR" 2>/dev/null || true
   fi
@@ -103,7 +111,7 @@ init_runtime_paths() {
   UI_ERROR_LOG="$ERROR_LOG"
 
   # Ensure state dir exists; fall back to repo dir if it cannot be used.
-  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+  if [[ "$DRY_RUN" != true && ${EUID:-$(id -u)} -eq 0 ]]; then
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     chmod 0755 "$STATE_DIR" 2>/dev/null || true
   fi
@@ -113,7 +121,7 @@ init_runtime_paths() {
   fi
 
   # Ensure env dir exists; fall back to repo dir if it cannot be used.
-  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+  if [[ "$DRY_RUN" != true && ${EUID:-$(id -u)} -eq 0 ]]; then
     mkdir -p "$ENV_DIR" 2>/dev/null || true
     chmod 0755 "$ENV_DIR" 2>/dev/null || true
   fi
@@ -168,6 +176,21 @@ ensure_python_venv() {
 # STATE MANAGEMENT
 # =============================================
 init_state() {
+  if [[ "$DRY_RUN" == true ]]; then
+    if [[ -f "$STATE_FILE" ]]; then
+      # shellcheck source=/dev/null
+      source "$STATE_FILE"
+    else
+      PACKAGES_OK=false
+      UNBOUND_OK=false
+      PIHOLE_OK=false
+      NETALERTX_OK=false
+      PY_SUITE_OK=false
+      HEALTH_OK=false
+    fi
+    return 0
+  fi
+
   mkdir -p "$(dirname "$STATE_FILE")"
   if [[ ! -f "$STATE_FILE" ]]; then
     cat > "$STATE_FILE" <<EOF
@@ -184,9 +207,25 @@ EOF
 }
 
 update_state() {
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: Would update state $1=$2"
+    return 0
+  fi
   sed -i "s/^$1=.*/$1=$2/" "$STATE_FILE"
   # shellcheck source=/dev/null
   source "$STATE_FILE"
+}
+
+reset_state_for_force() {
+  [[ "$FORCE" == true ]] || return 0
+  [[ "$DRY_RUN" == true ]] && { log "DRY RUN: Would reset installer state for --force"; return 0; }
+  log_warning "--force requested: resetting installer state flags"
+  update_state PACKAGES_OK false
+  update_state UNBOUND_OK false
+  update_state PIHOLE_OK false
+  update_state NETALERTX_OK false
+  update_state PY_SUITE_OK false
+  update_state HEALTH_OK false
 }
 
 
@@ -301,6 +340,10 @@ parse_args() {
       --install-netalertx|--with-netalertx) INSTALL_NETALERTX=true ;;
       --skip-netalertx) INSTALL_NETALERTX=false ;;
       --with-auto-update) INSTALL_AUTO_UPDATE=true ;;
+      --disable-auto-update) DISABLE_AUTO_UPDATE=true ;;
+      --uninstall-auto-update) UNINSTALL_AUTO_UPDATE=true ;;
+      --uninstall-suite-tools) UNINSTALL_SUITE_TOOLS=true ;;
+      --yes|-y) ASSUME_YES=true ;;
       --skip-python-api) INSTALL_PYTHON_SUITE=false ;;
       --minimal) INSTALL_NETALERTX=false; INSTALL_PYTHON_SUITE=false ;;
       *) log_error "Unknown option: $1"; exit 1 ;;
@@ -353,6 +396,10 @@ check_dependencies() {
 
 handle_systemd_resolved() {
   [[ "$CONTAINER_MODE" == true ]] && return 0
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: Would inspect and adjust systemd-resolved only if it conflicts with Pi-hole port 53"
+    return 0
+  fi
   command -v systemctl >/dev/null 2>&1 || return 0
 
   # systemd-resolved's stub listener (127.0.0.53/54:53) can block Pi-hole/dnsmasq from binding to :53.
@@ -635,10 +682,16 @@ configure_unbound() {
     # Create Unbound directories
     sudo install -d -m 0755 /var/lib/unbound
     
-    # Download root hints for DNS resolution
-    sudo curl -fsSL https://www.internic.net/domain/named.root -o /var/lib/unbound/root.hints || {
-      log_error "Failed to download root.hints"; exit 1;
-    }
+    # Download and validate root hints for DNS resolution.
+    if [[ -x "$RUNTIME_DIR/scripts/root_hints_refresh.sh" ]]; then
+      sudo "$RUNTIME_DIR/scripts/root_hints_refresh.sh" || {
+        log_error "Failed to refresh validated root.hints"; exit 1;
+      }
+    else
+      sudo "$SCRIPT_DIR/scripts/root_hints_refresh.sh" || {
+        log_error "Failed to refresh validated root.hints"; exit 1;
+      }
+    fi
     
     # Update/validate DNSSEC trust anchor (root.key)
     command -v unbound-anchor >/dev/null 2>&1 || { log_error "unbound-anchor missing"; exit 1; }
@@ -793,19 +846,18 @@ EOF
 # =============================================
 configure_pihole_v6_toml_upstreams() {
   local toml_file="/etc/pihole/pihole.toml"
+  local upstream="127.0.0.1#${UNBOUND_PORT}"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: Would ensure Pi-hole v6 upstreams are set to $upstream in $toml_file"
+    return 0
+  fi
 
   # Create the file if it doesn't exist
   if [[ ! -f "$toml_file" ]]; then
     log "Creating $toml_file..."
     sudo install -o pihole -g pihole -m 0644 /dev/null "$toml_file"
   fi
-
-  # Create timestamped backup preserving attributes
-  local backup_file="${toml_file}.backup.$(date +%Y%m%d_%H%M%S)"
-  sudo cp -a "$toml_file" "$backup_file"
-  log "Backup created: $backup_file"
-
-  local upstream="127.0.0.1#${UNBOUND_PORT}"
 
   # Fast-path: avoid rewriting TOML if upstreams already match expected.
   local current_upstreams=""
@@ -819,6 +871,11 @@ configure_pihole_v6_toml_upstreams() {
     log_success "Pi-hole upstreams already set to $upstream"
     return 0
   fi
+
+  # Create timestamped backup preserving attributes only when a write is needed.
+  local backup_file="${toml_file}.backup.$(date +%Y%m%d_%H%M%S)"
+  sudo cp -a "$toml_file" "$backup_file"
+  log "Backup created: $backup_file"
 
   # Always ensure the value is persisted in pihole.toml.
   # Note: `pihole-FTL --config` may update runtime config but not necessarily write TOML.
@@ -998,11 +1055,11 @@ setup_pihole_container() {
     # Remove existing Pi-hole container if it exists
     sudo docker rm -f pihole 2>/dev/null || true
     
-    log "Creating Pi-hole container with host networking..."
+    log "Creating Pi-hole container with host networking using image: $PIHOLE_IMAGE"
     sudo docker run -d --name pihole --network host \
       -e DNS1=127.0.0.1#$UNBOUND_PORT -e DNS2=no -e TZ=UTC \
       -e WEBPASSWORD="$(openssl rand -base64 32)" \
-      --restart unless-stopped pihole/pihole:latest || {
+      --restart unless-stopped "$PIHOLE_IMAGE" || {
       log_error "Pi-hole container failed to start"; exit 1;
     }
     
@@ -1021,7 +1078,7 @@ setup_pihole_container() {
     log_success "Pi-hole container is running"
     update_state PIHOLE_OK true
   else
-    log "DRY RUN: Would create Pi-hole container with host networking"
+    log "DRY RUN: Would create Pi-hole container with host networking using image: $PIHOLE_IMAGE"
     update_state PIHOLE_OK true
   fi
 }
@@ -1058,13 +1115,13 @@ setup_netalertx() {
       NETALERTX_PORT=20211
     fi
 
-    log "Creating NetAlertX container (host networking)..."
+    log "Creating NetAlertX container (host networking) using image: $NETALERTX_IMAGE"
     sudo docker run -d --name netalertx --network host \
       --user 20211:20211 \
       --cap-add=NET_ADMIN --cap-add=NET_RAW \
       -v /opt/netalertx/data:/data \
       --tmpfs /tmp:uid=20211,gid=20211,mode=1700 \
-      -e TZ=UTC --restart unless-stopped jokobsk/netalertx:latest || {
+      -e TZ=UTC --restart unless-stopped "$NETALERTX_IMAGE" || {
       log_error "NetAlertX container failed to start"; exit 1;
     }
     
@@ -1083,7 +1140,7 @@ setup_netalertx() {
     log_success "NetAlertX container is running"
     update_state NETALERTX_OK true
   else
-    log "DRY RUN: Would create NetAlertX container (host networking)"
+    log "DRY RUN: Would create NetAlertX container (host networking) using image: $NETALERTX_IMAGE"
     update_state NETALERTX_OK true
   fi
 }
@@ -1216,6 +1273,11 @@ EOF
 # HEALTH CHECKS
 # =============================================
 run_healthchecks() {
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: Would run health checks for Unbound, Pi-hole, optional NetAlertX, and optional Python Suite"
+    return 0
+  fi
+
   [[ "$HEALTH_OK" == true && "$FORCE" != true ]] && { log "✅ Health OK"; return; }
 
   local all_healthy=true
@@ -1274,7 +1336,10 @@ setup_auto_update() {
   fi
 
   # Required directories
-  sudo mkdir -p /var/backups/pihole-auto /var/log/pihole-suite
+  sudo install -d -m 0700 -o root -g root "$BACKUP_ROOT" "$BACKUP_ROOT/auto-update"
+  sudo install -d -m 0750 -o root -g root /var/log/pihole-suite
+
+  install_runtime_files
 
   # Install logrotate config
   if [[ -f "${SCRIPT_DIR}/config/logrotate-pihole-auto-update" ]]; then
@@ -1287,13 +1352,36 @@ setup_auto_update() {
 
   # Install systemd boot health check
   if [[ -f "${SCRIPT_DIR}/config/pihole-boot-check.service" ]]; then
-    sudo cp "${SCRIPT_DIR}/config/pihole-boot-check.service" /etc/systemd/system/
-    # Rewrite ExecStart to match actual repo location
-    sudo sed -i "s|ExecStart=.*|ExecStart=${SCRIPT_DIR}/scripts/boot_health_check.sh|" \
-      /etc/systemd/system/pihole-boot-check.service
+    local boot_script="$RUNTIME_DIR/scripts/boot_health_check.sh"
+    local tmp_unit
+    tmp_unit="$(mktemp)"
+    cat > "$tmp_unit" <<EOF
+[Unit]
+Description=Pi-hole + Unbound post-boot DNS health check
+After=network-online.target pihole-FTL.service unbound.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+EnvironmentFile=-$ENV_FILE
+ExecStart=$boot_script
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo install -m 0644 "$tmp_unit" /etc/systemd/system/pihole-boot-check.service
+    rm -f "$tmp_unit"
+    if command -v systemd-analyze >/dev/null 2>&1; then
+      sudo systemd-analyze verify /etc/systemd/system/pihole-boot-check.service 2>/dev/null || \
+        log_warning "systemd-analyze verify reported issues for pihole-boot-check.service"
+    fi
     sudo systemctl daemon-reload
     sudo systemctl enable pihole-boot-check.service
-    log_success "Boot health check service enabled (ExecStart=${SCRIPT_DIR}/scripts/boot_health_check.sh)"
+    log_success "Boot health check service enabled (ExecStart=$boot_script)"
   else
     log_warning "config/pihole-boot-check.service not found; skipping"
   fi
@@ -1302,25 +1390,109 @@ setup_auto_update() {
   chmod +x "${SCRIPT_DIR}/scripts/auto_update.sh" 2>/dev/null || true
   chmod +x "${SCRIPT_DIR}/scripts/boot_health_check.sh" 2>/dev/null || true
 
-  # Install weekly auto-update cron (Sunday 3 AM) — idempotent
-  local cron_entry="0 3 * * 0 ${SCRIPT_DIR}/scripts/auto_update.sh"
-  if sudo crontab -l 2>/dev/null | grep -qF "auto_update.sh"; then
-    log "Auto-update cron entry already exists"
-  else
-    (sudo crontab -l 2>/dev/null; echo "$cron_entry") | sudo crontab -
-    log_success "Weekly auto-update cron installed (Sunday 3 AM)"
-  fi
-
-  # Install monthly Unbound root hints refresh — idempotent
-  local root_hints_entry="0 4 1 * * curl -sf -o /var/lib/unbound/root.hints.new https://www.internic.net/domain/named.root && grep -q ROOT-SERVERS /var/lib/unbound/root.hints.new && mv /var/lib/unbound/root.hints.new /var/lib/unbound/root.hints && systemctl restart unbound || rm -f /var/lib/unbound/root.hints.new"
-  if sudo crontab -l 2>/dev/null | grep -qF "root.hints"; then
-    log "Root hints refresh cron entry already exists"
-  else
-    (sudo crontab -l 2>/dev/null; echo "$root_hints_entry") | sudo crontab -
-    log_success "Monthly Unbound root hints refresh cron installed"
-  fi
+  # Install suite-managed cron entries idempotently, replacing older repo-path entries.
+  local cron_entry="0 3 * * 0 . $ENV_FILE 2>/dev/null; $RUNTIME_DIR/scripts/auto_update.sh"
+  local root_hints_entry="0 4 1 * * . $ENV_FILE 2>/dev/null; $RUNTIME_DIR/scripts/root_hints_refresh.sh"
+  local current_cron filtered_cron
+  current_cron="$(sudo crontab -l 2>/dev/null || true)"
+  filtered_cron="$(printf '%s\n' "$current_cron" | grep -Ev 'auto_update\.sh|root[._]hints|root_hints_refresh\.sh' || true)"
+  {
+    printf '%s\n' "$filtered_cron" | sed '/^[[:space:]]*$/d'
+    printf '%s\n' "$cron_entry"
+    printf '%s\n' "$root_hints_entry"
+  } | sudo crontab -
+  log_success "Suite-managed cron entries installed (auto-update Sunday 3 AM, root hints monthly)"
 
   log_success "Auto-update system installed"
+}
+
+disable_auto_update() {
+  log "Disabling automated update jobs and boot health service..."
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: Would remove auto-update/root-hints cron entries and disable pihole-boot-check.service"
+    return 0
+  fi
+
+  local current_cron filtered_cron
+  current_cron="$(sudo crontab -l 2>/dev/null || true)"
+  filtered_cron="$(printf '%s\n' "$current_cron" | grep -Ev 'auto_update\.sh|root[._]hints|root_hints_refresh\.sh' || true)"
+  if [[ "$filtered_cron" != "$current_cron" ]]; then
+    printf '%s\n' "$filtered_cron" | sudo crontab -
+    log_success "Removed unattended update cron entries"
+  else
+    log "No unattended update cron entries found"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl disable --now pihole-boot-check.service 2>/dev/null || true
+    log_success "Disabled pihole-boot-check.service"
+  fi
+}
+
+uninstall_auto_update() {
+  disable_auto_update
+
+  log "Uninstalling auto-update system files..."
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: Would remove pihole-boot-check.service, logrotate config, and auto-update runtime scripts"
+    return 0
+  fi
+
+  sudo rm -f /etc/systemd/system/pihole-boot-check.service /etc/logrotate.d/pihole-auto-update
+  sudo rm -f "$RUNTIME_DIR/scripts/auto_update.sh" "$RUNTIME_DIR/scripts/boot_health_check.sh" "$RUNTIME_DIR/scripts/root_hints_refresh.sh"
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl daemon-reload
+  fi
+  log_success "Auto-update system files removed; backups and $ENV_FILE were left intact"
+}
+
+uninstall_suite_tools() {
+  disable_auto_update
+
+  log "Uninstalling suite runtime tools..."
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY RUN: Would remove $RUNTIME_DIR, /usr/local/bin/pihole-rescue, pihole-boot-check.service, and logrotate config"
+    return 0
+  fi
+
+  if [[ "$ASSUME_YES" != true ]]; then
+    if [[ -t 0 ]]; then
+      read -rp "Remove suite runtime tools but preserve Pi-hole, Unbound, backups, logs, state, and env? [y/N] " confirm
+      [[ "${confirm,,}" == "y" ]] || { log_warning "Suite tools uninstall cancelled"; return 1; }
+    else
+      log_error "--uninstall-suite-tools requires --yes in non-interactive mode"
+      return 1
+    fi
+  fi
+
+  sudo rm -f /etc/systemd/system/pihole-boot-check.service /etc/logrotate.d/pihole-auto-update /usr/local/bin/pihole-rescue
+  sudo rm -rf "$RUNTIME_DIR"
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl daemon-reload
+  fi
+  log_success "Suite runtime tools removed; Pi-hole, Unbound, backups, logs, state, and $ENV_FILE were left intact"
+}
+
+install_runtime_files() {
+  [[ "$DRY_RUN" == true ]] && { log "DRY RUN: Would install root-owned runtime files under $RUNTIME_DIR"; return 0; }
+
+  sudo install -d -m 0755 -o root -g root "$RUNTIME_DIR" "$RUNTIME_DIR/scripts" "$RUNTIME_DIR/scripts/lib" "$RUNTIME_DIR/tools"
+  sudo install -m 0755 "$SCRIPT_DIR/scripts/auto_update.sh" "$RUNTIME_DIR/scripts/auto_update.sh"
+  sudo install -m 0755 "$SCRIPT_DIR/scripts/boot_health_check.sh" "$RUNTIME_DIR/scripts/boot_health_check.sh"
+  sudo install -m 0755 "$SCRIPT_DIR/scripts/root_hints_refresh.sh" "$RUNTIME_DIR/scripts/root_hints_refresh.sh"
+  sudo install -m 0755 "$SCRIPT_DIR/scripts/rescue_menu.sh" "$RUNTIME_DIR/scripts/rescue_menu.sh"
+  sudo install -m 0644 "$SCRIPT_DIR/scripts/lib/ui.sh" "$RUNTIME_DIR/scripts/lib/ui.sh"
+  sudo install -m 0644 "$SCRIPT_DIR/scripts/lib/health.sh" "$RUNTIME_DIR/scripts/lib/health.sh"
+  sudo install -m 0755 "$SCRIPT_DIR/tools/pihole_maintenance_pro.sh" "$RUNTIME_DIR/tools/pihole_maintenance_pro.sh"
+
+  if [[ -f "$SCRIPT_DIR/start_suite.py" ]]; then
+    sudo install -m 0644 "$SCRIPT_DIR/start_suite.py" "$RUNTIME_DIR/start_suite.py"
+  fi
+
+  sudo -- ln -sfn "$RUNTIME_DIR/scripts/rescue_menu.sh" /usr/local/bin/pihole-rescue
+  sudo chown -h root:root /usr/local/bin/pihole-rescue 2>/dev/null || true
+  log_success "Runtime files installed under $RUNTIME_DIR"
 }
 
 # =============================================
@@ -1329,13 +1501,27 @@ setup_auto_update() {
 main() {
   parse_args "$@"
   init_runtime_paths
+
+  if [[ "$UNINSTALL_SUITE_TOOLS" == true ]]; then
+    uninstall_suite_tools
+    exit 0
+  elif [[ "$UNINSTALL_AUTO_UPDATE" == true ]]; then
+    uninstall_auto_update
+    exit 0
+  elif [[ "$DISABLE_AUTO_UPDATE" == true ]]; then
+    disable_auto_update
+    exit 0
+  fi
+
   init_state
+  reset_state_for_force
   validate_state_against_system
   check_dependencies
   handle_systemd_resolved
   check_ports
   install_packages
   ensure_suite_env_file
+  install_runtime_files
   configure_unbound
   setup_pihole
   
@@ -1419,7 +1605,7 @@ main() {
   echo "Next steps:"
   echo "  1. Configure your router to use ${host_ip} as DNS"
   echo "  2. Test with: dig @${host_ip} google.com"
-  echo "  3. Monitor with: ./check.sh"
+  echo "  3. Monitor with: bash scripts/post_install_check.sh --quick"
 }
 
 main "$@"

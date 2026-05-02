@@ -7,6 +7,13 @@ set -uo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly ENV_FILE="/etc/pihole-suite/pihole-suite.env"
+
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+fi
+
 readonly LOG_FILE="/var/log/pihole-suite/boot_check.log"
 readonly DNS_TEST_DOMAIN="${DNS_TEST_DOMAIN:-debian.org}"
 readonly STATUS_FILE="/var/tmp/pihole_boot_status"
@@ -24,6 +31,37 @@ else
   log_err()  { printf '[%s] ERR   %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 fi
 
+_health_lib="${SCRIPT_DIR}/lib/health.sh"
+if [[ -f "$_health_lib" ]]; then
+  # shellcheck source=/dev/null
+  source "$_health_lib"
+fi
+if ! declare -F suite_dns_health_check >/dev/null 2>&1; then
+  suite_dns_check() {
+    local port="$1" domain="${2:-debian.org}"
+    local response
+    response=$(dig +short +timeout=3 +tries=1 "@127.0.0.1" -p "$port" "$domain" 2>/dev/null)
+    [[ -n "$response" && "$response" != "0.0.0.0" ]]
+  }
+  suite_dns_health_check() {
+    local domain="${1:-debian.org}" max_attempts="${2:-3}" wait_sec="${3:-5}" attempt
+    for attempt in $(seq 1 "$max_attempts"); do
+      local pihole_ok=false unbound_ok=false
+      if suite_dns_check 53 "$domain"; then pihole_ok=true; fi
+      if suite_dns_check 5335 "$domain"; then unbound_ok=true; fi
+      if [[ "$pihole_ok" == true && "$unbound_ok" == true ]]; then
+        log_ok "DNS health check passed (attempt ${attempt}/${max_attempts})"
+        return 0
+      fi
+      if [[ "$attempt" -lt "$max_attempts" ]]; then
+        log_warn "DNS check failed (attempt ${attempt}/${max_attempts}): Pi-hole=$pihole_ok Unbound=$unbound_ok; retrying in ${wait_sec}s"
+        sleep "$wait_sec"
+      fi
+    done
+    return 1
+  }
+fi
+
 export UI_LOG_FILE="$LOG_FILE"
 mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -32,17 +70,10 @@ log_info "========== BOOT HEALTH CHECK $(date '+%Y-%m-%d %H:%M:%S') =========="
 # Wait for services to stabilize after boot
 sleep 10
 
-dns_check() {
-  local port="$1"
-  local response
-  response=$(dig +short +timeout=3 +tries=1 "@127.0.0.1" -p "$port" "$DNS_TEST_DOMAIN" 2>/dev/null)
-  [[ -n "$response" && "$response" != "0.0.0.0" ]]
-}
-
 dns_healthy=false
 
 # First attempt
-if dns_check 53 && dns_check 5335; then
+if suite_dns_health_check "$DNS_TEST_DOMAIN" 1 0; then
   log_ok "DNS healthy on boot (Pi-hole + Unbound)"
   dns_healthy=true
 else
@@ -51,7 +82,7 @@ else
   sleep 5
 
   # Retry
-  if dns_check 53 && dns_check 5335; then
+  if suite_dns_health_check "$DNS_TEST_DOMAIN" 1 0; then
     log_ok "DNS recovered after service restart"
     dns_healthy=true
   else

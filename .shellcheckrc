@@ -1,4 +1,5 @@
-# ShellCheck configuration for Pi-hole + Unbound Suite
+source-path=SCRIPTDIR
+external-sources=true# ShellCheck configuration for Pi-hole + Unbound Suite
 # https://www.shellcheck.net/wiki/
 # All scripts in this repo target bash on Debian/Ubuntu.
 

@@ -10,7 +10,7 @@
 # Install:  sudo crontab -e → 0 3 * * 0 /path/to/scripts/auto_update.sh
 # Manual:   sudo bash /path/to/scripts/auto_update.sh
 # Env vars: NOTIFY_URL  — ntfy.sh / Pushover / webhook URL (optional)
-#           DRY_RUN=1   — skip actual reboot (for testing)
+#           DRY_RUN=1   — simulate update flow without snapshots, status writes, maintenance, or reboot
 # =============================================================================
 
 # Explicit error handling — do NOT use set -e (we handle failures per-step)
@@ -25,7 +25,16 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 readonly MAINT_SCRIPT="${REPO_DIR}/tools/pihole_maintenance_pro.sh"
 readonly LOCK_FILE="/var/run/pihole-auto-update.lock"
-readonly SNAPSHOT_DIR="/var/backups/pihole-auto"
+readonly ENV_FILE="/etc/pihole-suite/pihole-suite.env"
+
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+fi
+
+readonly BACKUP_ROOT="${PIHOLE_BACKUP_ROOT:-/var/backups/pihole-suite}"
+readonly SNAPSHOT_DIR="${PIHOLE_AUTO_BACKUP_DIR:-${BACKUP_ROOT}/auto-update}"
+readonly SNAPSHOT_RETENTION="${PIHOLE_AUTO_BACKUP_RETENTION:-8}"
 readonly LOG_DIR="/var/log/pihole-suite"
 readonly LOG_FILE="${LOG_DIR}/auto_update.log"
 readonly STATUS_FILE="/var/tmp/pihole_update_status"
@@ -51,11 +60,44 @@ else
   log_err()  { printf '[%s] ERR   %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 fi
 
+_health_lib="${SCRIPT_DIR}/lib/health.sh"
+if [[ -f "$_health_lib" ]]; then
+  # shellcheck source=/dev/null
+  source "$_health_lib"
+fi
+if ! declare -F suite_dns_health_check >/dev/null 2>&1; then
+  suite_dns_check() {
+    local port="$1" domain="${2:-debian.org}"
+    local response
+    response=$(dig +short +timeout=3 +tries=1 "@127.0.0.1" -p "$port" "$domain" 2>/dev/null)
+    [[ -n "$response" && "$response" != "0.0.0.0" ]]
+  }
+  suite_dns_health_check() {
+    local domain="${1:-debian.org}" max_attempts="${2:-3}" wait_sec="${3:-5}" attempt
+    for attempt in $(seq 1 "$max_attempts"); do
+      local pihole_ok=false unbound_ok=false
+      if suite_dns_check 53 "$domain"; then pihole_ok=true; fi
+      if suite_dns_check 5335 "$domain"; then unbound_ok=true; fi
+      if [[ "$pihole_ok" == true && "$unbound_ok" == true ]]; then
+        log_ok "DNS health check passed (attempt ${attempt}/${max_attempts})"
+        return 0
+      fi
+      if [[ "$attempt" -lt "$max_attempts" ]]; then
+        log_warn "DNS check failed (attempt ${attempt}/${max_attempts}): Pi-hole=$pihole_ok Unbound=$unbound_ok; retrying in ${wait_sec}s"
+        sleep "$wait_sec"
+      fi
+    done
+    return 1
+  }
+fi
+
 export UI_LOG_FILE="$LOG_FILE"
 
 # ---------------------------------------------------------------------------
 # VALIDATE NOTIFY_URL — only allow http(s) schemes
 # ---------------------------------------------------------------------------
+AUTO_DRY_RUN="${DRY_RUN:-0}"
+
 if [[ -n "${NOTIFY_URL:-}" ]]; then
   if [[ ! "$NOTIFY_URL" =~ ^https?:// ]]; then
     log_warn "NOTIFY_URL must start with http:// or https:// (got: ${NOTIFY_URL%%://*}://…). Disabling notifications."
@@ -75,6 +117,7 @@ OLD_PIHOLE_VER=""
 OLD_KERNEL=""
 UNBOUND_CHECKSUMS_BEFORE=""
 SUMMARY=""
+SNAPSHOT_RUN_DIR=""
 
 # ---------------------------------------------------------------------------
 # ROOT CHECK
@@ -87,17 +130,24 @@ fi
 # ---------------------------------------------------------------------------
 # ENSURE DIRECTORIES EXIST
 # ---------------------------------------------------------------------------
-mkdir -p "$LOG_DIR" "$SNAPSHOT_DIR"
-chmod 700 "$SNAPSHOT_DIR"
-chmod 750 "$LOG_DIR"
+if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+  log_info "DRY_RUN=1 — no snapshots, status files, maintenance, or reboot will be performed"
+else
+  install -d -m 0750 -o root -g root "$LOG_DIR"
+  install -d -m 0700 -o root -g root "$BACKUP_ROOT" "$SNAPSHOT_DIR"
+fi
 
 # ---------------------------------------------------------------------------
 # FLOCK — prevent overlapping runs
 # ---------------------------------------------------------------------------
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  log_err "Another auto_update.sh is already running (lock: $LOCK_FILE). Exiting."
-  exit 1
+if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+  log_info "DRY_RUN=1 — would acquire lock: $LOCK_FILE"
+else
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    log_err "Another auto_update.sh is already running (lock: $LOCK_FILE). Exiting."
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -169,9 +219,9 @@ fi
 if [[ "$preflight_ok" != true ]]; then
   SUMMARY="[FAIL] Pre-flight checks failed. No updates applied."
   log_err "$SUMMARY"
-  echo "$(date '+%s') PREFLIGHT_FAIL" > "$STATUS_FILE"
+  [[ "$AUTO_DRY_RUN" == "1" ]] || echo "$(date '+%s') FAIL preflight:FAIL" > "$STATUS_FILE"
   # Send notification if configured
-  if [[ -n "${NOTIFY_URL:-}" ]]; then
+  if [[ "$AUTO_DRY_RUN" != "1" && -n "${NOTIFY_URL:-}" ]]; then
     curl -sf --max-time 10 -d "$SUMMARY" "$NOTIFY_URL" 2>/dev/null || true
   fi
   exit 1
@@ -184,20 +234,101 @@ log_ok "Pre-flight checks passed"
 log_info "Creating pre-update snapshot..."
 
 # Snapshot Pi-hole config
-if [[ -f "$PIHOLE_CONF" ]]; then
-  cp -f "$PIHOLE_CONF" "${SNAPSHOT_DIR}/pihole.toml.pre"
-  log_ok "Snapshot: pihole.toml"
+if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+  log_info "DRY_RUN=1 — would snapshot Pi-hole and Unbound configuration to $SNAPSHOT_DIR"
+else
+  SNAPSHOT_RUN_DIR="${SNAPSHOT_DIR}/$(date +%Y%m%d_%H%M%S)"
+  install -d -m 0700 -o root -g root "$SNAPSHOT_RUN_DIR"
+  if [[ -f "$PIHOLE_CONF" ]]; then
+    cp -a "$PIHOLE_CONF" "${SNAPSHOT_RUN_DIR}/pihole.toml.pre"
+    log_ok "Snapshot: pihole.toml"
+  fi
 fi
 
 # Snapshot Unbound config
-if [[ -d "$UNBOUND_CONF_DIR" ]]; then
-  rm -rf "${SNAPSHOT_DIR}/unbound.conf.d.pre"
-  cp -a "$UNBOUND_CONF_DIR" "${SNAPSHOT_DIR}/unbound.conf.d.pre"
+if [[ "$AUTO_DRY_RUN" != "1" && -d "$UNBOUND_CONF_DIR" ]]; then
+  cp -a "$UNBOUND_CONF_DIR" "${SNAPSHOT_RUN_DIR}/unbound.conf.d.pre"
   log_ok "Snapshot: unbound.conf.d"
 fi
 
+prune_snapshots() {
+  local keep="${1:-$SNAPSHOT_RETENTION}"
+  local -a old_snapshots=()
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=8
+  (( keep > 0 )) || keep=8
+
+  mapfile -t old_snapshots < <(find "$SNAPSHOT_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk -v keep="$keep" 'NR > keep {print $2}')
+  local old_snapshot
+  for old_snapshot in "${old_snapshots[@]}"; do
+    rm -rf "$old_snapshot" && log_info "Pruned old auto-update snapshot: $old_snapshot"
+  done
+}
+
+if [[ "$AUTO_DRY_RUN" != "1" ]]; then
+  prune_snapshots "$SNAPSHOT_RETENTION"
+fi
+
+restore_unbound_snapshot() {
+  local snapshot_dir="${SNAPSHOT_RUN_DIR}/unbound.conf.d.pre"
+  local restore_dir
+
+  if [[ ! -d "$snapshot_dir" ]]; then
+    log_err "No snapshot available for restore"
+    return 1
+  fi
+
+  restore_dir="$(mktemp -d /tmp/pihole-unbound-restore.XXXXXX)" || return 1
+  cp -a "$snapshot_dir/." "$restore_dir/" || {
+    rm -rf "$restore_dir"
+    log_err "Failed to stage Unbound snapshot restore"
+    return 1
+  }
+
+  if command -v unbound-checkconf >/dev/null 2>&1; then
+    local check_root
+    check_root="$(mktemp -d /tmp/pihole-unbound-check.XXXXXX)" || {
+      rm -rf "$restore_dir"
+      return 1
+    }
+    mkdir -p "$check_root/etc/unbound"
+    cp -a /etc/unbound/. "$check_root/etc/unbound/" 2>/dev/null || true
+    rm -rf "$check_root/etc/unbound/unbound.conf.d"
+    mkdir -p "$check_root/etc/unbound/unbound.conf.d"
+    cp -a "$restore_dir/." "$check_root/etc/unbound/unbound.conf.d/"
+    # Best effort: unbound-checkconf does not support an alternate root on all distros.
+    rm -rf "$check_root"
+  fi
+
+  local previous_dir="${UNBOUND_CONF_DIR}.pre-auto-restore.$(date +%Y%m%d_%H%M%S)"
+  if [[ -d "$UNBOUND_CONF_DIR" ]]; then
+    mv "$UNBOUND_CONF_DIR" "$previous_dir" || {
+      rm -rf "$restore_dir"
+      log_err "Failed to preserve current Unbound config before restore"
+      return 1
+    }
+  fi
+  mkdir -p "$(dirname "$UNBOUND_CONF_DIR")"
+  mv "$restore_dir" "$UNBOUND_CONF_DIR" || {
+    [[ -d "$previous_dir" ]] && mv "$previous_dir" "$UNBOUND_CONF_DIR" 2>/dev/null || true
+    log_err "Failed to move restored Unbound config into place"
+    return 1
+  }
+
+  if command -v unbound-checkconf >/dev/null 2>&1 && ! unbound-checkconf >/dev/null 2>&1; then
+    rm -rf "$UNBOUND_CONF_DIR"
+    [[ -d "$previous_dir" ]] && mv "$previous_dir" "$UNBOUND_CONF_DIR" 2>/dev/null || true
+    log_err "Restored Unbound config failed validation; previous config restored"
+    return 1
+  fi
+
+  rm -rf "$previous_dir" 2>/dev/null || true
+  return 0
+}
+
 # Record checksums for change detection
-if [[ -d "$UNBOUND_CONF_DIR" ]]; then
+if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+  log_info "DRY_RUN=1 — would validate changed Unbound config and rollback from snapshot if needed"
+elif [[ -d "$UNBOUND_CONF_DIR" ]]; then
   UNBOUND_CHECKSUMS_BEFORE=$(find "$UNBOUND_CONF_DIR" -type f -exec md5sum {} + 2>/dev/null | sort)
 fi
 
@@ -210,7 +341,9 @@ log_info "Current state: Pi-hole ${OLD_PIHOLE_VER}, kernel ${OLD_KERNEL}"
 
 log_info "Running pihole_maintenance_pro.sh (timeout: ${MAINT_TIMEOUT}s)..."
 
-if [[ ! -x "$MAINT_SCRIPT" ]]; then
+if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+  log_info "DRY_RUN=1 — would run maintenance script: $MAINT_SCRIPT"
+elif [[ ! -x "$MAINT_SCRIPT" ]]; then
   log_err "Maintenance script not found or not executable: $MAINT_SCRIPT"
   MAINT_FAILED=true
 else
@@ -231,16 +364,16 @@ fi
 # =================== PHASE 4: POST-UPDATE VALIDATION ======================
 
 # --- Check if Unbound config was modified by apt ---
-if [[ -d "$UNBOUND_CONF_DIR" ]]; then
+if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+  log_info "DRY_RUN=1 — would compare and validate post-update Unbound config"
+elif [[ -d "$UNBOUND_CONF_DIR" ]]; then
   unbound_checksums_after=$(find "$UNBOUND_CONF_DIR" -type f -exec md5sum {} + 2>/dev/null | sort)
   if [[ "$UNBOUND_CHECKSUMS_BEFORE" != "$unbound_checksums_after" ]]; then
     log_info "Unbound config changed during update — validating..."
     if command -v unbound-checkconf &>/dev/null; then
       if ! unbound-checkconf &>/dev/null; then
         log_err "Unbound config BROKEN after update — restoring from snapshot"
-        if [[ -d "${SNAPSHOT_DIR}/unbound.conf.d.pre" ]]; then
-          rm -rf "$UNBOUND_CONF_DIR"
-          cp -a "${SNAPSHOT_DIR}/unbound.conf.d.pre" "$UNBOUND_CONF_DIR"
+        if restore_unbound_snapshot; then
           systemctl restart unbound 2>/dev/null || true
           sleep 3
           if unbound-checkconf &>/dev/null; then
@@ -249,7 +382,7 @@ if [[ -d "$UNBOUND_CONF_DIR" ]]; then
             log_err "Unbound config still broken after restore"
           fi
         else
-          log_err "No snapshot available for restore"
+          log_err "Unbound snapshot restore failed; live config left intact when possible"
         fi
       else
         log_ok "Unbound config changed but passes validation"
@@ -266,47 +399,21 @@ fi
 
 # ==================== PHASE 5: DNS HEALTH CHECK ============================
 
-dns_check() {
-  local port="$1" label="$2"
-  local response
-  response=$(dig +short +timeout=3 +tries=1 "@127.0.0.1" -p "$port" "$DNS_TEST_DOMAIN" 2>/dev/null)
-  # Must return a non-empty, non-0.0.0.0 response
-  if [[ -n "$response" && "$response" != "0.0.0.0" ]]; then
-    return 0
-  fi
-  return 1
-}
-
-dns_health_check() {
-  local attempt max_attempts=3 wait_sec=5
-  for attempt in $(seq 1 $max_attempts); do
-    local pihole_ok=false unbound_ok=false
-    if dns_check 53 "Pi-hole"; then pihole_ok=true; fi
-    if dns_check 5335 "Unbound"; then unbound_ok=true; fi
-
-    if [[ "$pihole_ok" == true && "$unbound_ok" == true ]]; then
-      log_ok "DNS health check passed (attempt ${attempt}/${max_attempts})"
-      return 0
-    fi
-
-    if [[ $attempt -lt $max_attempts ]]; then
-      log_warn "DNS check failed (attempt ${attempt}/${max_attempts}): Pi-hole=$pihole_ok Unbound=$unbound_ok — retrying in ${wait_sec}s"
-      sleep "$wait_sec"
-    fi
-  done
-  return 1
-}
-
 log_info "Running DNS health check..."
-if ! dns_health_check; then
-  log_warn "DNS health check failed — attempting service recovery..."
-  systemctl restart pihole-FTL unbound 2>/dev/null || true
-  sleep 5
-  if ! dns_health_check; then
-    log_err "DNS BROKEN after recovery attempt"
+if ! suite_dns_health_check "$DNS_TEST_DOMAIN" 3 5; then
+  if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+    log_warn "DRY_RUN=1 — DNS health check failed; would attempt service recovery"
     DNS_BROKEN=true
   else
-    log_ok "DNS recovered after service restart"
+    log_warn "DNS health check failed — attempting service recovery..."
+    systemctl restart pihole-FTL unbound 2>/dev/null || true
+    sleep 5
+    if ! suite_dns_health_check "$DNS_TEST_DOMAIN" 3 5; then
+      log_err "DNS BROKEN after recovery attempt"
+      DNS_BROKEN=true
+    else
+      log_ok "DNS recovered after service restart"
+    fi
   fi
 fi
 
@@ -381,14 +488,18 @@ fi
 log_info "$SUMMARY"
 
 # Write machine-readable status
-if [[ "$MAINT_FAILED" == true || "$DNS_BROKEN" == true ]]; then
+if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+  log_info "DRY_RUN=1 — would write status to $STATUS_FILE: ${status_parts[*]}"
+elif [[ "$MAINT_FAILED" == true || "$DNS_BROKEN" == true ]]; then
   echo "$(date '+%s') FAIL ${status_parts[*]}" > "$STATUS_FILE"
 else
   echo "$(date '+%s') OK ${status_parts[*]}" > "$STATUS_FILE"
 fi
 
 # Send notification if configured
-if [[ -n "${NOTIFY_URL:-}" ]]; then
+if [[ "$AUTO_DRY_RUN" == "1" ]]; then
+  log_info "DRY_RUN=1 — would send notification if configured"
+elif [[ -n "${NOTIFY_URL:-}" ]]; then
   if curl -sf --max-time 10 -d "$SUMMARY" "$NOTIFY_URL" 2>/dev/null; then
     log_ok "Notification sent"
   else
@@ -401,7 +512,7 @@ fi
 if [[ "$NEEDS_REBOOT" == true ]]; then
   if [[ -n "$REBOOT_BLOCKED_REASON" ]]; then
     log_warn "Reboot BLOCKED: $REBOOT_BLOCKED_REASON"
-  elif [[ "${DRY_RUN:-0}" == "1" ]]; then
+  elif [[ "$AUTO_DRY_RUN" == "1" ]]; then
     log_info "DRY_RUN=1 — would reboot now, but skipping."
   else
     log_info "Rebooting in 15 seconds (kernel updated)..."

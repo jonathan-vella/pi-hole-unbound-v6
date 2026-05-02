@@ -17,8 +17,11 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # CONSTANTS
 # ---------------------------------------------------------------------------
 readonly SCRIPT_VERSION="1.0.0"
-readonly BACKUP_DIR="${PIHOLE_BACKUP_DIR:-/home/pi/pihole-rescue-backups}"
-readonly LOG_FILE="/var/log/pihole-rescue-menu.log"
+readonly BACKUP_ROOT="${PIHOLE_BACKUP_ROOT:-/var/backups/pihole-suite}"
+readonly LEGACY_BACKUP_DIR="/home/pi/pihole-rescue-backups"
+readonly BACKUP_DIR="${PIHOLE_BACKUP_DIR:-${BACKUP_ROOT}/rescue}"
+readonly LOG_FILE="/var/log/pihole-suite/rescue_menu.log"
+readonly LOCK_FILE="/var/run/pihole-rescue-menu.lock"
 readonly RESOLV_BACKUP="/tmp/.pihole-rescue-resolv.bak"
 readonly PIHOLE_CONF="/etc/pihole/pihole.toml"
 readonly UNBOUND_CONF_DIR="/etc/unbound"
@@ -66,6 +69,48 @@ _log() {
   local ts
   ts=$(date '+%Y-%m-%d %H:%M:%S')
   printf '[%s] %s\n' "$ts" "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+with_backup_lock() {
+  local action="$1"
+  shift
+  exec 8>"$LOCK_FILE"
+  if ! flock -n 8; then
+    _err "Another rescue backup/restore operation is already running."
+    return 1
+  fi
+  "$@"
+  local rc=$?
+  _log "$action finished with rc=$rc"
+  return "$rc"
+}
+
+ensure_backup_root() {
+  mkdir -p "$BACKUP_DIR" || return 1
+  chown root:root "$BACKUP_ROOT" "$BACKUP_DIR" 2>/dev/null || true
+  chmod 700 "$BACKUP_ROOT" "$BACKUP_DIR" 2>/dev/null || true
+}
+
+validate_backup_dir() {
+  local bdir="$1"
+  local symlinks unsafe
+
+  [[ -d "$bdir" ]] || { _err "Backup directory missing: $bdir"; return 1; }
+
+  symlinks=$(find "$bdir" -type l 2>/dev/null)
+  if [[ -n "$symlinks" ]]; then
+    _err "Backup contains symlinks (possible tampering). Aborting restore."
+    printf '%s\n' "$symlinks" | sed 's/^/    /'
+    return 1
+  fi
+
+  unsafe=$(find "$bdir" -type d \( -perm -002 -o -perm -020 \) -print -quit 2>/dev/null)
+  if [[ -n "$unsafe" ]]; then
+    _err "Backup contains group/world-writable directories. Aborting restore: $unsafe"
+    return 1
+  fi
+
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -187,7 +232,10 @@ PYEOF
 # ---------------------------------------------------------------------------
 _backup_write() {
   local bdir="$1"
+  ensure_backup_root || { _err "Cannot prepare backup root: $BACKUP_DIR"; return 1; }
   mkdir -p "$bdir"
+  chown root:root "$bdir" 2>/dev/null || true
+  chmod 700 "$bdir" 2>/dev/null || true
   local ok=0 fail=0
 
   if [[ -f "$PIHOLE_CONF" ]]; then
@@ -238,6 +286,10 @@ _backup_write() {
 
 _list_backups() {
   _BACKUPS=()
+  if [[ ! -d "$BACKUP_DIR" && -d "$LEGACY_BACKUP_DIR" && -z "${PIHOLE_BACKUP_DIR:-}" ]]; then
+    _warn "Legacy backup directory found at $LEGACY_BACKUP_DIR"
+    _warn "New backups use $BACKUP_DIR. Set PIHOLE_BACKUP_DIR to inspect legacy backups."
+  fi
   if [[ ! -d "$BACKUP_DIR" ]] || [[ -z "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]]; then
     _warn "No backups found in $BACKUP_DIR"
     return 1
@@ -412,10 +464,9 @@ menu_nightly_test() {
 menu_backup_create() {
   _header
   printf '  %s=== CREATE BACKUP ===%s\n\n' "$UI_BOLD" "$UI_RESET"
-  mkdir -p "$BACKUP_DIR"
   local ts
   ts=$(date '+%Y%m%d_%H%M%S')
-  _backup_write "${BACKUP_DIR}/${ts}"
+  with_backup_lock "backup create" _backup_write "${BACKUP_DIR}/${ts}"
   _log "backup created: ${BACKUP_DIR}/${ts}"
   _pause
 }
@@ -442,12 +493,7 @@ menu_backup_restore() {
   local bdir="${BACKUP_DIR}/${chosen}"
   printf '\n  %sRestore from: %s%s\n' "$UI_YELLOW" "$chosen" "$UI_RESET"
 
-  # Security: check for symlinks in backup directory
-  local symlinks
-  symlinks=$(find "$bdir" -type l 2>/dev/null)
-  if [[ -n "$symlinks" ]]; then
-    _err "Backup contains symlinks (possible tampering). Aborting restore."
-    printf '%s\n' "$symlinks" | sed 's/^/    /'
+  if ! validate_backup_dir "$bdir"; then
     _pause
     return
   fi
@@ -455,15 +501,7 @@ menu_backup_restore() {
   read -rp "  Confirm? [y/N] " confirm
   [[ "${confirm,,}" != "y" ]] && return
 
-  [[ -f "$bdir/pihole.toml" ]] \
-    && cp "$bdir/pihole.toml" "$PIHOLE_CONF" && _ok "pihole.toml restored" \
-    || _warn "pihole.toml not in this backup"
-
-  if [[ -d "$bdir/unbound" ]]; then
-    cp -r "$bdir/unbound/." "$UNBOUND_CONF_DIR/" \
-      && _ok "/etc/unbound restored" \
-      || _err "/etc/unbound restore failed"
-  fi
+  with_backup_lock "backup restore" _restore_backup_dir "$bdir"
 
   printf '\n  Restarting services...\n'
   systemctl restart unbound 2>&1 && _ok "unbound restarted" \
@@ -479,6 +517,20 @@ menu_backup_restore() {
 
   _log "restored from: $bdir"
   _pause
+}
+
+_restore_backup_dir() {
+  local bdir="$1"
+
+  [[ -f "$bdir/pihole.toml" ]] \
+    && cp "$bdir/pihole.toml" "$PIHOLE_CONF" && _ok "pihole.toml restored" \
+    || _warn "pihole.toml not in this backup"
+
+  if [[ -d "$bdir/unbound" ]]; then
+    cp -r "$bdir/unbound/." "$UNBOUND_CONF_DIR/" \
+      && _ok "/etc/unbound restored" \
+      || _err "/etc/unbound restore failed"
+  fi
 }
 
 # --- 6. Delete Old Backups ---------------------------------------------------
@@ -498,18 +550,13 @@ menu_backup_delete() {
   case "${sel,,}" in
     a)
       local count=0
-      for b in "${_BACKUPS[@]:1}"; do
-        rm -rf "${BACKUP_DIR:?}/${b}" && count=$((count + 1)) || true
-      done
+      with_backup_lock "backup delete keep-newest" _delete_backups_keep_newest count
       _ok "$count backup(s) deleted (newest kept)"
       _log "deleted $count backups (keep-newest)"
       ;;
     b)
       local count=0
-      while IFS= read -r -d '' f; do
-        rm -rf "$f" && count=$((count + 1)) || true
-      done < <(find "$BACKUP_DIR" -maxdepth 1 -mindepth 1 \
-        -type d -mtime +14 -print0 2>/dev/null)
+      with_backup_lock "backup delete old" _delete_old_backups count
       _ok "$count backup(s) older than 14 days deleted"
       _log "deleted $count backups >14 days"
       ;;
@@ -517,6 +564,23 @@ menu_backup_delete() {
     *) _err "Invalid choice: '$sel'" ;;
   esac
   _pause
+}
+
+_delete_backups_keep_newest() {
+  local -n count_ref="$1"
+  local b
+  for b in "${_BACKUPS[@]:1}"; do
+    rm -rf "${BACKUP_DIR:?}/${b}" && count_ref=$((count_ref + 1)) || true
+  done
+}
+
+_delete_old_backups() {
+  local -n count_ref="$1"
+  local f
+  while IFS= read -r -d '' f; do
+    rm -rf "$f" && count_ref=$((count_ref + 1)) || true
+  done < <(find "$BACKUP_DIR" -maxdepth 1 -mindepth 1 \
+    -type d -mtime +14 -print0 2>/dev/null)
 }
 
 # --- 7. Last Known Good Restore ----------------------------------------------
@@ -545,10 +609,11 @@ menu_last_known_good() {
   if [[ -n "$newest" ]]; then
     printf '\n  %s[1/4] Restoring backup...%s\n' "$UI_BLUE" "$UI_RESET"
     local bdir="${BACKUP_DIR}/${newest}"
-    [[ -f "$bdir/pihole.toml" ]] \
-      && cp "$bdir/pihole.toml" "$PIHOLE_CONF" && _ok "pihole.toml" || true
-    [[ -d "$bdir/unbound" ]] \
-      && cp -r "$bdir/unbound/." "$UNBOUND_CONF_DIR/" && _ok "/etc/unbound" || true
+    if validate_backup_dir "$bdir"; then
+      with_backup_lock "last-known-good restore" _restore_backup_dir "$bdir"
+    else
+      _err "Newest backup failed validation; skipping restore step"
+    fi
   else
     printf '\n  %s[1/4] No backup -- skipped%s\n' "$UI_BLUE" "$UI_RESET"
   fi

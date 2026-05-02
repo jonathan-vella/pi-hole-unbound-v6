@@ -8,7 +8,7 @@
 [![Pi-hole](https://img.shields.io/badge/Pi--hole-v6.4-red?style=for-the-badge&logo=pihole)](https://pi-hole.net/)
 [![Unbound](https://img.shields.io/badge/Unbound-DNS-orange?style=for-the-badge)](https://nlnetlabs.nl/projects/unbound/)
 [![Debian](https://img.shields.io/badge/Debian-Bookworm%2FTrixie-red?style=for-the-badge&logo=debian)](https://debian.org/)
-[![Python](https://img.shields.io/badge/Python-3.12+-blue?style=for-the-badge&logo=python)](https://python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11+-blue?style=for-the-badge&logo=python)](https://python.org/)
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=000&style=for-the-badge)](https://buymeacoffee.com/timintech)
 
 <img src="https://skillicons.dev/icons?i=linux,debian,raspberrypi,bash,python,fastapi" alt="Tech Stack" />
@@ -48,6 +48,10 @@ sudo ./install.sh
 | Flag | Beschreibung |
 |------|-------------|
 | `--with-auto-update` | Automatisches wöchentliches Update-System installieren (Cron, Logrotate, Systemd) |
+| `--disable-auto-update` | Unbeaufsichtigte Cron-Einträge entfernen und Boot-Gesundheitsprüfung deaktivieren |
+| `--uninstall-auto-update` | Auto-Update deaktivieren und Service/Logrotate/Runtime-Dateien entfernen; Backups/Env bleiben erhalten |
+| `--uninstall-suite-tools` | Suite-Runtime-Tools und Wrapper entfernen; DNS-Dienste, Backups, Logs, State und Env bleiben erhalten |
+| `--yes` / `-y` | Nicht-interaktive Suite-Tools-Deinstallation bestätigen |
 | `--with-netalertx` | NetAlertX Netzwerk-Monitor installieren (Docker) |
 | `--skip-python-api` | Optionale Python Suite API überspringen |
 | `--minimal` | Sowohl NetAlertX als auch Python API überspringen |
@@ -65,7 +69,7 @@ sudo ./install.sh
 | **Plattform** | Raspberry Pi 3/4/5, Debian Bookworm/Trixie (64-bit) |
 | **Pi-hole** | v6.x (wird durch dieses Script installiert) |
 | **Unbound** | Wird installiert und auf Port 5335 konfiguriert |
-| **Python** | 3.12+ (für optionale Suite API) |
+| **Python** | 3.11+ (für optionale Suite API) |
 | **Nutzer** | Normaler Nutzer mit sudo |
 
 Abhängigkeiten manuell installieren (optional):
@@ -178,13 +182,13 @@ Ein gehärteter unbeaufsichtigter Update-Wrapper, der `pihole_maintenance_pro.sh
 **Funktionen:**
 - 45-Minuten-Ausführungstimeout
 - Vorab-Prüfungen: Speicherplatz, NTP-Synchronisation, apt-Lock-Erkennung
-- Konfigurations-Snapshots vor dem Update (`/var/backups/pihole-auto`)
+- Konfigurations-Snapshots vor dem Update (`/var/backups/pihole-suite/auto-update`)
 - Unbound-Konfigurationsvalidierung mit automatischem Rollback bei Fehler
 - DNS-Gesundheitsprüfungen (3 Versuche auf Port 53 und 5335)
 - Erkennung von Pi-hole-Hauptversionsänderungen
 - Duale Reboot-Signale: `/var/run/reboot-required`-Datei + Kernel-Mismatch-Erkennung
 - Reboot wird blockiert wenn DNS defekt ist (Sicherheitsschutz)
-- Optionale Webhook-Benachrichtigungen via `NOTIFY_URL`-Umgebungsvariable
+- Optionale Webhook-Benachrichtigungen via `NOTIFY_URL` in `/etc/pihole-suite/pihole-suite.env`
 - Trockenlauf-Modus: `DRY_RUN=1 bash scripts/auto_update.sh`
 
 **Auto-Update-System aktivieren:**
@@ -192,12 +196,18 @@ Ein gehärteter unbeaufsichtigter Update-Wrapper, der `pihole_maintenance_pro.sh
 # Option A: Über den Installer
 sudo ./install.sh --with-auto-update
 
-# Option B: Manuelle Einrichtung
+# Option B: Manuelle Einrichtung ist für fortgeschrittene Nutzer.
+# Bevorzugt den Installer, damit Cron/Systemd root-eigene Runtime-Kopien nutzen.
+sudo install -d -m 0755 /usr/local/lib/pihole-suite/scripts /usr/local/lib/pihole-suite/scripts/lib /usr/local/lib/pihole-suite/tools
+sudo install -m 0755 scripts/auto_update.sh scripts/boot_health_check.sh scripts/root_hints_refresh.sh /usr/local/lib/pihole-suite/scripts/
+sudo install -m 0644 scripts/lib/ui.sh /usr/local/lib/pihole-suite/scripts/lib/ui.sh
+sudo install -m 0755 tools/pihole_maintenance_pro.sh /usr/local/lib/pihole-suite/tools/pihole_maintenance_pro.sh
+
 # 1. Wöchentlicher Auto-Update-Cron (Sonntag 3:00 Uhr)
-(sudo crontab -l 2>/dev/null; echo '0 3 * * 0 /home/pi/pi-hole-unbound-v6/scripts/auto_update.sh') | sudo crontab -
+(sudo crontab -l 2>/dev/null; echo '0 3 * * 0 . /etc/pihole-suite/pihole-suite.env 2>/dev/null; /usr/local/lib/pihole-suite/scripts/auto_update.sh') | sudo crontab -
 
 # 2. Monatliche Unbound Root-Hints-Aktualisierung
-(sudo crontab -l 2>/dev/null; echo '0 4 1 * * curl -sf -o /var/lib/unbound/root.hints.new https://www.internic.net/domain/named.root && mv /var/lib/unbound/root.hints.new /var/lib/unbound/root.hints && systemctl restart unbound') | sudo crontab -
+(sudo crontab -l 2>/dev/null; echo '0 4 1 * * . /etc/pihole-suite/pihole-suite.env 2>/dev/null; /usr/local/lib/pihole-suite/scripts/root_hints_refresh.sh') | sudo crontab -
 
 # 3. Logrotate
 sudo cp config/logrotate-pihole-auto-update /etc/logrotate.d/pihole-auto-update
@@ -207,13 +217,16 @@ sudo cp config/pihole-boot-check.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable pihole-boot-check.service
 
 # 5. Erforderliche Verzeichnisse
-sudo mkdir -p /var/backups/pihole-auto /var/log/pihole-suite
+sudo install -d -m 0700 /var/backups/pihole-suite /var/backups/pihole-suite/auto-update
+sudo install -d -m 0750 /var/log/pihole-suite
 ```
 
 **Webhook-Benachrichtigungen:**
-`NOTIFY_URL` setzen um Benachrichtigungen bei Update-Erfolg/-Fehler zu erhalten:
+`NOTIFY_URL` in `/etc/pihole-suite/pihole-suite.env` setzen, damit unbeaufsichtigte Cron/Systemd-Läufe Benachrichtigungen senden können:
 ```bash
-export NOTIFY_URL="https://hooks.slack.com/services/..."
+sudo install -d -m 0755 /etc/pihole-suite
+echo 'NOTIFY_URL="https://hooks.slack.com/services/..."' | sudo tee -a /etc/pihole-suite/pihole-suite.env
+sudo chmod 640 /etc/pihole-suite/pihole-suite.env
 ```
 
 **Boot-Gesundheitsprüfung** (`config/pihole-boot-check.service`):
@@ -235,6 +248,7 @@ pi-hole-unbound-v6/
 ├── scripts/
 │   ├── auto_update.sh             # Gehärteter wöchentlicher Auto-Update-Wrapper
 │   ├── boot_health_check.sh       # DNS-Validierung nach Neustart
+│   ├── root_hints_refresh.sh      # Validierte monatliche Unbound Root-Hints-Aktualisierung
 │   ├── console_menu.sh            # Interaktives Verwaltungsmenü
 │   ├── rescue_menu.sh             # Rescue & Backup Menü (sudo pihole-rescue)
 │   ├── post_install_check.sh      # Post-Install-Verifikation
@@ -246,6 +260,9 @@ pi-hole-unbound-v6/
 │   └── pihole_maintenance_pro.sh  # Batch-Wartungsscript
 └── docs/
     ├── CONSOLE_MENU.md            # Vollständige Menü-Dokumentation
+    ├── ACCEPTANCE_TESTS.md        # Manuelle Validierungs-Checkliste
+    ├── CONFIGURATION.md           # Runtime-Konfigurationsvariablen
+    ├── SHELL_AND_CONFIG_RULES.md  # Sicherheitsregeln für Beiträge
     └── assets/                    # Screenshots
 ```
 
@@ -289,10 +306,12 @@ sudo pihole-rescue   # Option 4: Backup erstellen
 sudo pihole-rescue   # Option 5: Backup wiederherstellen
 ```
 
-Backups werden in `/home/pi/pihole-rescue-backups/` gespeichert und enthalten:
+Backups werden standardmäßig in `/var/backups/pihole-suite/rescue/` gespeichert und enthalten:
 - `/etc/pihole/pihole.toml`
-- `/etc/unbound/unbound.conf.d/`
+- `/etc/unbound/`
 - Systemd Drop-in Dateien
+
+Alte Backups in `/home/pi/pihole-rescue-backups/` werden für Migration weiterhin erkannt. Neue root-ausgeführte Backups sollten unter `/var/backups/pihole-suite` mit restriktiven Rechten bleiben.
 
 ---
 

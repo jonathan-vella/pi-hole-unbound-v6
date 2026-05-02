@@ -206,7 +206,7 @@ test_required_files() {
   cd_repo_root || return 1
 
   local file
-  for file in install.sh README.md README.de.md start_suite.py scripts/post_install_check.sh scripts/console_menu.sh scripts/auto_update.sh scripts/boot_health_check.sh .gitignore; do
+  for file in install.sh README.md README.de.md start_suite.py scripts/post_install_check.sh scripts/console_menu.sh scripts/auto_update.sh scripts/boot_health_check.sh scripts/root_hints_refresh.sh scripts/lib/health.sh .gitignore; do
     if [[ -f "$file" ]]; then
       pass "Required file exists: $file"
     else
@@ -221,7 +221,7 @@ test_optional_files() {
   cd_repo_root || return 1
 
   local file
-  for file in tools/pihole_maintenance_pro.sh docs/CONSOLE_MENU.md config/logrotate-pihole-auto-update config/pihole-boot-check.service; do
+  for file in tools/pihole_maintenance_pro.sh docs/CONSOLE_MENU.md docs/ACCEPTANCE_TESTS.md docs/CONFIGURATION.md docs/SHELL_AND_CONFIG_RULES.md config/logrotate-pihole-auto-update config/pihole-boot-check.service pyproject.toml .shellcheckrc Makefile .github/workflows/ci.yml tests/test_start_suite.py tests/test_shell_static.py; do
     if [[ -f "$file" ]]; then
       info "Optional file present: $file"
     else
@@ -237,6 +237,9 @@ test_script_shebangs() {
     "$REPO_ROOT/install.sh"
     "$SCRIPT_DIR/post_install_check.sh"
     "$SCRIPT_DIR/console_menu.sh"
+    "$SCRIPT_DIR/auto_update.sh"
+    "$SCRIPT_DIR/boot_health_check.sh"
+    "$SCRIPT_DIR/root_hints_refresh.sh"
   )
 
   for script in "${scripts[@]}"; do
