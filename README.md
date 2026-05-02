@@ -284,6 +284,10 @@ sudo bash scripts/post_install_check.sh --full
 
 ![Post-Install Check](docs/assets/screenshot_post_install.png)
 
+### Migrating From The Original TimInTech Repo
+
+If your Pi was originally installed from `TimInTech/Pi-hole-Unbound-PiAlert-Setup`, do not start by deleting the old checkout or forcing a reinstall. Follow [docs/MIGRATION_FROM_TIMINTECH.md](docs/MIGRATION_FROM_TIMINTECH.md) to back up the current Pi-hole/Unbound state, run dry-run checks, adopt this project's root-owned runtime tools, and validate DNS safely.
+
 ---
 
 ## 🆘 Rescue Operations

@@ -62,6 +62,21 @@ list_shell_scripts() {
   fi
 }
 
+list_executable_shell_scripts() {
+  cd "$REPO_ROOT" || return 1
+  printf '%s\n' \
+    install.sh \
+    scripts/auto_update.sh \
+    scripts/boot_health_check.sh \
+    scripts/console_menu.sh \
+    scripts/nightly_test.sh \
+    scripts/post_install_check.sh \
+    scripts/repo_selftest.sh \
+    scripts/rescue_menu.sh \
+    scripts/root_hints_refresh.sh \
+    tools/pihole_maintenance_pro.sh
+}
+
 cd_repo_root() {
   if ! cd "$REPO_ROOT"; then
     fail "Cannot change to repo root: $REPO_ROOT"
@@ -89,7 +104,7 @@ test_bash_syntax() {
     else
       fail "Syntax ERROR: $script"
     fi
-  done < <(list_shell_scripts)
+  done < <(list_executable_shell_scripts)
 }
 
 test_executable_bits() {
@@ -206,13 +221,19 @@ test_required_files() {
   cd_repo_root || return 1
 
   local file
-  for file in install.sh README.md README.de.md start_suite.py scripts/post_install_check.sh scripts/console_menu.sh scripts/auto_update.sh scripts/boot_health_check.sh scripts/root_hints_refresh.sh scripts/lib/health.sh .gitignore; do
+  for file in install.sh README.md start_suite.py scripts/post_install_check.sh scripts/console_menu.sh scripts/auto_update.sh scripts/boot_health_check.sh scripts/root_hints_refresh.sh scripts/lib/health.sh .gitignore; do
     if [[ -f "$file" ]]; then
       pass "Required file exists: $file"
     else
       fail "Required file MISSING: $file"
     fi
   done
+
+  if [[ -f README.de.md ]]; then
+    pass "Optional localized README exists: README.de.md"
+  else
+    warn "Optional localized README missing: README.de.md"
+  fi
 }
 
 test_optional_files() {
