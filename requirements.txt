@@ -2,7 +2,7 @@
 # Last verified: 2026-05-02
 #
 # Core FastAPI and web framework
-fastapi>=0.136.1,<1.0.0
+fastapi>=0.137.0,<1.0.0
 uvicorn[standard]>=0.46.0,<1.0.0
 pydantic>=2.13.3,<3.0.0
 
